@@ -78,6 +78,8 @@ const db = {
   del(store, key) { return this.tx(store, "readwrite", s => { s.delete(key); }); },
   all(store) { return this.tx(store, "readonly", s => this.req(s.getAll())); },
   clear(store) { return this.tx(store, "readwrite", s => { s.clear(); }); },
+  delPrefix(store, prefix) { return this.tx(store, "readwrite", s => { s.delete(IDBKeyRange.bound(prefix, prefix + "\uffff")); }); },
+  keys(store) { return this.tx(store, "readonly", s => this.req(s.getAllKeys())); },
   putMany(store, entries) { return this.tx(store, "readwrite", s => { for (const [k, v] of entries) s.put(v, k); }); },
 };
 
@@ -212,7 +214,7 @@ function standSummary(regs) {
 }
 
 /* ------------------------------------------------------------------ state + kort */
-const state = { data: null, regs: [], selected: null, me: null, standLayer: null, overlays: [], basemap: 0 };
+const state = { data: null, regs: [], allRegs: [], selected: null, me: null, standLayer: null, overlays: [], basemap: 0 };
 const map = L.map("map", { zoomControl: false, attributionControl: true, maxZoom: 21 }).setView([56.0, 9.5], 7);
 L.control.zoom({ position: "bottomright" }).addTo(map);
 /* Ortofoto fra SkovPlan (MBTiles, gemt i telefonens IndexedDB) */
@@ -220,7 +222,7 @@ L.control.zoom({ position: "bottomright" }).addTo(map);
 const OrthoLayer = L.GridLayer.extend({
   createTile(c, done) {
     const cv = document.createElement("canvas"); cv.width = cv.height = 256;
-    db.get("tiles", `${c.z}/${c.x}/${c.y}`).then(b => {
+    db.get("tiles", `${this.options.prefix || ""}${c.z}/${c.x}/${c.y}`).then(b => {
       if (!b) return done(null, cv);
       const img = new Image();
       img.onload = () => {
@@ -251,7 +253,7 @@ const BASEMAPS = [
 ];
 function makeOrtho() {
   const m = state.ortho; if (!m) return null;
-  return new OrthoLayer({ minZoom: 0, maxZoom: 21, minNativeZoom: m.minzoom, maxNativeZoom: m.maxzoom, attribution: m.attribution || "Ortofoto",
+  return new OrthoLayer({ prefix: m.prefix || "", minZoom: 0, maxZoom: 21, minNativeZoom: m.minzoom, maxNativeZoom: m.maxzoom, attribution: m.attribution || "Ortofoto",
     bounds: m.bounds ? L.latLngBounds([m.bounds[1], m.bounds[0]], [m.bounds[3], m.bounds[2]]) : undefined });
 }
 function setBasemap(i) {
@@ -307,7 +309,7 @@ const colorFor = art => { const k = normName(art); return k ? (COLOR_LOOKUP[k] |
 function drawData() {
   state.overlays.forEach(l => map.removeLayer(l)); state.overlays = [];
   (state.extraLabels || []).forEach(t => t.remove()); state.extraLabels = [];
-  if (!state.data) return;
+  if (!state.data) { state.standLayer = null; return; }
   const L_ = state.data.layers;
   for (const name of ["kortlinjer", "adgangsveje", "ejendomsgraense", "indgange"]) {
     if (!L_[name]) continue; const st = LAYERS[name].style;
@@ -423,6 +425,7 @@ function startGps() {
     const st = standAt(lon, lat);
     $("#where").textContent = km > 1 ? `${state.data?.name || ""} · du er ${fmt(km, km < 10 ? 1 : 0)} km væk`
       : (st ? `Du står i ${standLabel(st.properties)} · ` : "") + `±${Math.round(accuracy)} m`;
+    trackPoint(lat, lon, accuracy, pos.timestamp); updateNav();
   }, err => toast("GPS er ikke tilgængelig" + (err.message ? ": " + err.message : "")), { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
 }
 function inRing(x, y, ring) {
@@ -495,6 +498,7 @@ function selectStand(f) {
       <button data-act="note">✎ Note</button>
     </div>
     <button class="big" data-act="taksation">Taksér litraet direkte (Hg, Dg, stamtal …)</button>
+    <button class="big" data-act="goStand">➜ Gå til ${esc(standLabel(p))}</button>
     ${s.plots || s.Hg != null || s.Dg != null ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${[s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "",
       s.Hg != null ? `Hg ${fmt(s.Hg)} m` : "", s.Dg != null ? `Dg ${fmt(s.Dg)} cm` : "", s.N ? `${fmt(s.N, 0)} stk/ha` : "",
       s.G ? `G ${fmt(s.G)} m²/ha` : "", s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ")}</div>` : ""}
@@ -509,6 +513,7 @@ function regItem(r) {
   else if (r.type === "foto") txt = "Foto" + (r.data.note ? ": " + esc(r.data.note) : "");
   else if (r.type === "note") { const n = childPhotos(r).length; txt = (r.data.general ? "<b>Generel note</b>" + (r.data.note ? ": " : "") : "") + esc(r.data.note) + (n ? ` · 📷 ${n}` : ""); }
   else if (r.type === "taksation") txt = `Taksation: Hg ${fmt(num(r.data.hg))} · Dg ${fmt(num(r.data.dg))} · ${fmt(num(r.data.n), 0)} stk/ha`;
+  else if (r.type === "spor") txt = `Rute ${fmtLen(r.data.length_m)} · ${Math.round(r.data.minutes || 0)} min` + (r.data.note ? ": " + esc(r.data.note) : "");
   const thumb = r.type === "foto" ? r.id : r.type === "note" ? childPhotos(r)[0]?.id : null;
   return `<li data-id="${r.id}">${thumb ? `<img data-thumb="${thumb}" alt="">` : ""}
     <div class="grow">${txt}<br><span class="muted">${when}${r.stand ? " · " + esc(r.stand.label) : ""}${r.exported ? " · eksporteret" : ""}</span></div>
@@ -564,6 +569,7 @@ function plotForm(reg) {
     <div class="stack">
       <button class="primary big" id="pSave">Gem prøveflade</button>
       ${reg._new ? "" : '<button class="danger" id="pDel">Slet prøveflade</button>'}
+      ${!reg._new && reg.lat ? '<button id="goReg">➜ Gå hertil</button>' : ""}
     </div>`, true);
   const body = $("#pRows");
   const opts = sel => arts.map(a => `<option ${a === sel ? "selected" : ""}>${esc(a)}</option>`).join("");
@@ -624,6 +630,7 @@ function plotForm(reg) {
     await saveReg(reg); toast("Prøveflade gemt"); backToStand(reg);
   };
   if ($("#pDel")) $("#pDel").onclick = () => deleteReg(reg);
+  if ($("#goReg")) $("#goReg").onclick = () => { closeSheet(); goTo(reg.lat, reg.lon, "Prøveflade " + (reg.stand?.label || "")); };
   drawRows(); summary();
   if (reg._new) body.querySelector('input[data-k="d1"]').focus();
 }
@@ -666,7 +673,8 @@ function noteForm(reg) {
     <label>${reg.type === "foto" ? "Tekst til billedet" : "Note"}</label><textarea id="nNote">${esc(reg.data.note || "")}</textarea>
     ${isNote ? `<div id="nPhotos" class="thumbs"></div>
     <div class="actions"><button id="nCam">📷 Tag billede</button><button id="nGal">🖼 Vælg billeder</button></div>` : ""}
-    <div class="stack"><button class="primary big" id="nSave">Gem</button>${reg._new ? "" : '<button class="danger" id="nDel">Slet</button>'}</div>`);
+    <div class="stack"><button class="primary big" id="nSave">Gem</button>${reg._new ? "" : '<button class="danger" id="nDel">Slet</button>'}
+    ${!reg._new && reg.lat ? '<button id="goReg">➜ Gå hertil</button>' : ""}</div>`);
   if (reg.photo) $("#nImg").src = URL.createObjectURL(reg.photo);
   if (isNote) {
     state.noteDraft = reg;
@@ -694,7 +702,7 @@ function noteForm(reg) {
     state.noteDraft = null;
     await saveReg(reg);
     if (isNote) {
-      for (const id of drop) { await db.del("regs", id); state.regs = state.regs.filter(r => r.id !== id); }
+      for (const id of drop) { await db.del("regs", id); dropRegs(r => r.id === id); }
       for (const c of childPhotos(reg)) if (c.data.note !== reg.data.note) { c.data.note = reg.data.note; await saveReg(c); }
       for (const x of add) await saveReg({ id: x.id, type: "foto", created: x.created, lat: reg.lat, lon: reg.lon, accuracy: reg.accuracy,
         stand: reg.stand, data: { note: reg.data.note, parent: reg.id, general: !!reg.data.general }, photo: x.blob });
@@ -703,6 +711,7 @@ function noteForm(reg) {
     toast("Gemt"); backToStand(reg);
   };
   if ($("#nDel")) $("#nDel").onclick = () => deleteReg(reg);
+  if ($("#goReg")) $("#goReg").onclick = () => { closeSheet(); goTo(reg.lat, reg.lon, (reg.data.general ? "Generel note" : reg.type === "foto" ? "Foto" : "Note") + (reg.stand ? " · " + reg.stand.label : "")); };
 }
 async function takePhoto(file) {
   const blob = await shrinkImage(file, 1600, 0.82);
@@ -735,18 +744,21 @@ function newReg(type, general = false) {
   if (type === "taksation") return stand ? taxForm({ ...base, data: {} }) : toast("Vælg et litra først");
   if (type === "note") return noteForm({ ...base, data: general ? { note: "", general: true } : { note: "" } });
 }
+/* state.allRegs: alle registreringer på telefonen; state.regs: kun den aktive ejendoms. */
+function dropRegs(pred) { state.regs = state.regs.filter(r => !pred(r)); state.allRegs = state.allRegs.filter(r => !pred(r)); }
+const regsFor = d => state.allRegs.filter(r => !r.ejendom || !d || r.ejendom === d.name);
 async function saveReg(reg) {
   delete reg._new; reg.updated = new Date().toISOString(); delete reg.exported; delete reg.synced;
   if (!reg.ejendom) reg.ejendom = state.data?.name || null;
   await db.put("regs", reg);
-  const i = state.regs.findIndex(r => r.id === reg.id); i >= 0 ? state.regs[i] = reg : state.regs.push(reg);
+  for (const list of [state.regs, state.allRegs]) { const i = list.findIndex(r => r.id === reg.id); i >= 0 ? list[i] = reg : list.push(reg); }
   drawRegMarkers(); restyle(); refreshMenuInfo(); scheduleSync();
 }
 async function deleteReg(reg) {
   if (!confirm("Slet denne registrering?")) return;
   const gone = new Set([reg.id, ...childPhotos(reg).map(c => c.id)]);
   for (const id of gone) await db.del("regs", id);
-  state.regs = state.regs.filter(r => !gone.has(r.id)); state.noteDraft = null;
+  dropRegs(r => gone.has(r.id)); state.noteDraft = null;
   drawRegMarkers(); restyle(); refreshMenuInfo(); backToStand(reg); scheduleSync(true);
 }
 function backToStand(reg) {
@@ -757,7 +769,9 @@ function backToStand(reg) {
 let regLayer = null;
 function drawRegMarkers() {
   if (regLayer) map.removeLayer(regLayer);
-  regLayer = L.layerGroup(state.regs.filter(r => r.lat).map(r => L.circleMarker([r.lat, r.lon], {
+  regLayer = L.layerGroup(state.regs.filter(r => r.lat).map(r => r.type === "spor"
+    ? L.polyline(r.data.points.map(p => [p[0], p[1]]), { color: "#e8710a", weight: 3, opacity: 0.8, dashArray: "1 6", lineCap: "round" }).on("click", () => editReg(r.id))
+    : L.circleMarker([r.lat, r.lon], {
     radius: r.type === "proeveflade" ? 7 : 5, color: "#fff", weight: 2, fillOpacity: 1,
     fillColor: { proeveflade: "#7a1fa2", foto: "#e8710a", note: "#1a73e8", taksation: "#0b8043" }[r.type],
   }).on("click", () => editReg(r.id)))).addTo(map);
@@ -765,7 +779,7 @@ function drawRegMarkers() {
 function editReg(id) {
   const r = state.regs.find(x => x.id === id); if (!r) return;
   const copy = { ...r, data: JSON.parse(JSON.stringify(r.data)) };
-  ({ proeveflade: plotForm, taksation: taxForm, foto: noteForm, note: noteForm })[r.type](copy);
+  ({ proeveflade: plotForm, taksation: taxForm, foto: noteForm, note: noteForm, spor: trackForm })[r.type](copy);
 }
 function listAll() {
   state.selected = null; restyle();
@@ -829,6 +843,10 @@ function buildGeoJSON() {
         grundflade_m2_ha: +s.G.toFixed(2), dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
       if (r.type === "taksation") Object.assign(props, { hg_m: r.data.hg, dg_cm: r.data.dg, stamtal_ha: r.data.n, grundflade_m2_ha: r.data.g, vedmasse_m3_ha: r.data.v, bk_pct: r.data.bk, ny_traeart: r.data.art || null });
       if (r.type === "foto") props.foto = photoName(r);
+      if (r.type === "spor") {
+        Object.assign(props, { laengde_m: r.data.length_m, varighed_min: Math.round(r.data.minutes || 0), slut: r.data.points.length ? new Date(r.data.points[r.data.points.length - 1][2] * 1000).toISOString() : null });
+        return { type: "Feature", geometry: { type: "LineString", coordinates: r.data.points.map(p => [p[1], p[0]]) }, properties: props };
+      }
       return { type: "Feature", geometry: r.lat ? { type: "Point", coordinates: [+r.lon.toFixed(7), +r.lat.toFixed(7)] } : null, properties: props };
     }),
   };
@@ -885,7 +903,7 @@ async function clearExported() {
   if (!done.length) return toast("Ingen eksporterede registreringer at slette");
   if (!confirm(`Slet ${done.length} registreringer, der allerede er eksporteret?`)) return;
   for (const r of done) await db.del("regs", r.id);
-  state.regs = state.regs.filter(r => !r.exported); drawRegMarkers(); restyle(); refreshMenuInfo(); closeSheet();
+  dropRegs(r => r.exported); drawRegMarkers(); restyle(); refreshMenuInfo(); closeSheet();
 }
 
 /* ------------------------------------------------------------------ online synkronisering
@@ -949,7 +967,7 @@ function refreshMenuInfo() {
   $("#btnMenu").classList.toggle("pending", c ? ns > 0 : ne > 0);
   $("#btnMenu").title = c ? (ns ? `${ns} venter på at blive sendt` : "Alt er sendt til SkovPlan") : (ne ? `${ne} ikke eksporteret` : "");
   $("#btnUpdatePkg")?.classList.toggle("hidden", !onlinePackageUrl());
-  $("#btnChoose")?.classList.toggle("hidden", !safeLS("kundeUrl"));
+  propertyList().then(l => $("#btnChoose")?.classList.toggle("hidden", !(l.length > 1 || safeLS("kundeUrl"))));
 }
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
@@ -961,8 +979,10 @@ const ACTIONS = {
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
   newPlot: () => newReg("proeveflade"), note: () => newReg("note"), taksation: () => newReg("taksation"),
   generalNote: () => newReg("note", true),
+  goStand: () => { const f = state.selected; if (!f) return; const c = standTarget(f); closeSheet(); goTo(c.lat, c.lng, "Litra " + standLabel(f.properties)); },
+  track: toggleTrack,
   packageLink: askPackageLink,
-  chooseProperty: () => chooseProperty(),
+  chooseProperty: () => propertySheet(),
   updatePackage: () => { const u = onlinePackageUrl(); u ? downloadPackage(u) : askPackageLink(); },
   install: async () => {
     if (state.installPrompt) { state.installPrompt.prompt(); const r = await state.installPrompt.userChoice; state.installPrompt = null;
@@ -1051,27 +1071,10 @@ async function downloadPackage(url) {
 }
 /* Kunde med flere ejendomme: …/?kunde=<kunde.json>. Kunden vælger ejendom; én ad gangen ligger på telefonen. */
 async function chooseProperty(url) {
-  url = url || safeLS("kundeUrl");
-  if (!url) return askPackageLink();
-  if (!navigator.onLine) return toast("Telefonen har ikke net lige nu. Prøv igen, når den har.", 5000);
-  let info;
-  try {
-    const res = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    info = await res.json();
-  } catch (err) { return toast("Listen over ejendomme kunne ikke hentes: " + err.message, 6000); }
-  safeLS("kundeUrl", url);
-  const list = info.ejendomme || [];
-  $("#empty").classList.add("hidden");
-  openSheet(`<div class="head"><h3>${esc(info.kunde || "Vælg ejendom")}</h3><button class="close">Luk</button></div>
-    <p class="muted">Vælg den ejendom, du skal ud i. Kort og ortofoto hentes og virker derefter uden net. Du kan skifte senere under menuen.</p>
-    <ul class="list">${list.map((e, i) => `<li><div class="grow"><b>${esc(e.navn)}</b>${state.data?.name === e.navn ? '<br><span class="muted">på telefonen nu</span>' : ""}</div>
-      <button class="primary" data-pick="${i}">Hent</button></li>`).join("")}</ul>`);
-  sheet.querySelectorAll("button[data-pick]").forEach(b => b.onclick = async () => {
-    const e = list[+b.dataset.pick]; closeSheet();
-    if (state.data && state.data.name !== e.navn && syncCfg()) { try { await syncNow(false); } catch (err) { /* sendes senere */ } }
-    downloadPackage(e.url);
-  });
+  if (url) safeLS("kundeUrl", url);
+  if (!safeLS("kundeUrl")) return askPackageLink();
+  if (!navigator.onLine) toast("Telefonen har ikke net lige nu, så kun ejendomme på telefonen vises.", 5000);
+  return propertySheet();
 }
 function askPackageLink() {
   const text = prompt("Indsæt linket, som du har fået fra SkovPlan:");
@@ -1082,7 +1085,11 @@ function askPackageLink() {
 async function loadGpkg(g, f, meta) {
   const data = readGpkg(g, f);
   if (meta) { const { _extra, ...pakke } = meta; data.pakke = pakke; if (_extra) data.extra = _extra; }
-  await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData(); scheduleSync();
+  data.id = propId(data);
+  await db.put("kv", data, "skovkort:" + data.id);
+  await activateProperty(data, await db.get("kv", "ortofoto:" + data.id));
+  await rememberProperty(data);
+  scheduleSync();
   toast(`Indlæst: ${data.layers.skovafdelinger.features.length} litradele`);
 }
 /* Læs ortofotoet (MBTiles fra SkovPlan) og læg fliserne i telefonens lager, så det virker uden net. */
@@ -1092,20 +1099,22 @@ async function loadOrtho(g, f) {
     (g.exec("SELECT name, value FROM metadata")[0]?.values || []).forEach(([k, v]) => meta[k] = v);
     const total = g.exec("SELECT count(*) FROM tiles")[0].values[0][0];
     if (!total) throw new Error("filen har ingen fliser");
-    await db.clear("tiles");
+    const id = state.data?.id || "uden-skovkort", prefix = id + "|";
+    await removeTiles(await db.get("kv", "ortofoto:" + id));
     const st = g.prepare("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles");
     const type = /png/i.test(meta.format || "") ? "image/png" : "image/jpeg";
     let batch = [], done = 0, minz = 99, maxz = 0;
     while (st.step()) {
       const [z, x, row, data] = st.get();
       minz = Math.min(minz, z); maxz = Math.max(maxz, z);
-      batch.push([`${z}/${x}/${(1 << z) - 1 - row}`, new Blob([data], { type })]);
+      batch.push([`${prefix}${z}/${x}/${(1 << z) - 1 - row}`, new Blob([data], { type })]);
       if (batch.length >= 300) { await db.putMany("tiles", batch); done += batch.length; batch = []; toast(`Gemmer ortofoto … ${Math.round(done / total * 100)} %`, 60000); }
     }
     st.free(); if (batch.length) await db.putMany("tiles", batch);
     state.ortho = { name: f.name, minzoom: minz, maxzoom: maxz, attribution: meta.attribution || "Ortofoto",
-      bounds: meta.bounds ? meta.bounds.split(",").map(Number) : null, loaded: new Date().toISOString(), tiles: total };
-    await db.put("kv", state.ortho, "ortofoto");
+      bounds: meta.bounds ? meta.bounds.split(",").map(Number) : null, loaded: new Date().toISOString(), tiles: total, prefix };
+    await db.put("kv", state.ortho, "ortofoto:" + id);
+    if (state.data) await rememberProperty(state.data);
     setBasemap(0); restyle();
     if (!state.data && state.ortho.bounds) { const b = state.ortho.bounds; map.fitBounds([[b[1], b[0]], [b[3], b[2]]]); }
     toast(`Ortofoto gemt (${total} fliser) – virker uden net`, 4000);
@@ -1121,13 +1130,233 @@ function showWelcome(force) {
 }
 function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelinger).getBounds(), { padding: [20, 20] }); } catch (e) { /* tom */ } }
 
+
+/* ------------------------------------------------------------------ «Gå til»: kompas, afstand og linje på kortet */
+let navLine = null, navMarker = null, heading = null;
+const toRad = d => d * Math.PI / 180;
+function bearing(a, b) {
+  const y = Math.sin(toRad(b.lng - a.lng)) * Math.cos(toRad(b.lat));
+  const x = Math.cos(toRad(a.lat)) * Math.sin(toRad(b.lat)) - Math.sin(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.cos(toRad(b.lng - a.lng));
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+const compassName = b => ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"][Math.round(b / 45) % 8];
+const fmtLen = m => m >= 1000 ? fmt(m / 1000, m < 10000 ? 2 : 1) + " km" : Math.round(m || 0) + " m";
+/* Et punkt inde i litraet (midten af den største del, hvis midten ligger udenfor: et punkt i polygonen). */
+function standTarget(f) {
+  const layer = L.geoJSON(f), parts = [];
+  layer.eachLayer(l => parts.push(l));
+  let best = parts[0], area = 0;
+  for (const l of parts) { const b = l.getBounds(), a = (b.getNorth() - b.getSouth()) * (b.getEast() - b.getWest()); if (a > area) { area = a; best = l; } }
+  const c = best.getBounds().getCenter();
+  if (standAt(c.lng, c.lat)?.properties === f.properties) return c;
+  const ring = best.getLatLngs().flat(3); return ring.length ? L.latLngBounds(ring.slice(0, 3)).getCenter() : c;
+}
+async function goTo(lat, lon, label) {
+  state.nav = { lat, lon, label };
+  try {   // iPhone kræver tilladelse til kompasset
+    if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission();
+  } catch (e) { /* uden kompas */ }
+  startCompass();
+  if (navMarker) map.removeLayer(navMarker);
+  navMarker = L.marker([lat, lon], { icon: L.divIcon({ className: "", html: '<div class="nav-target"></div>', iconSize: [22, 22] }) }).addTo(map);
+  $("#navbar").classList.remove("hidden"); $("#navLabel").textContent = label || "Punkt";
+  if (state.me) map.fitBounds(L.latLngBounds([[lat, lon], [state.me.lat, state.me.lon]]).pad(0.3), { maxZoom: 18 });
+  else map.setView([lat, lon], Math.max(map.getZoom(), 16));
+  follow = false; updateNav();
+}
+function stopNav() {
+  state.nav = null; $("#navbar").classList.add("hidden");
+  for (const l of [navLine, navMarker]) if (l) map.removeLayer(l);
+  navLine = navMarker = null;
+}
+let compassOn = false;
+function startCompass() {
+  if (compassOn) return; compassOn = true;
+  const on = e => {
+    let h = null;
+    if (typeof e.webkitCompassHeading === "number") h = e.webkitCompassHeading;
+    else if (e.absolute && typeof e.alpha === "number") h = 360 - e.alpha;
+    if (h === null) return;
+    heading = (h + (screen.orientation?.angle || 0) + 360) % 360; updateNav();
+  };
+  if ("ondeviceorientationabsolute" in window) window.addEventListener("deviceorientationabsolute", on);
+  else window.addEventListener("deviceorientation", on);
+}
+function updateNav() {
+  const n = state.nav; if (!n) return;
+  if (!state.me) { $("#navDist").textContent = "Venter på GPS …"; return; }
+  const me = L.latLng(state.me.lat, state.me.lon), to = L.latLng(n.lat, n.lon);
+  const d = map.distance(me, to), b = bearing(me, to);
+  if (navLine) navLine.setLatLngs([me, to]);
+  else navLine = L.polyline([me, to], { color: "#1a73e8", weight: 3, dashArray: "6 6", interactive: false }).addTo(map);
+  const here = d <= Math.max(5, state.me.accuracy || 0);
+  $("#navDist").textContent = here ? "Du er fremme" : `${fmtLen(d)} mod ${compassName(b)}`;
+  $("#navArrow").style.transform = `rotate(${heading === null ? b : b - heading}deg)`;
+  $("#navArrow").classList.toggle("here", here);
+  $("#navHint").textContent = heading === null ? "Pilen peger i forhold til kortet (nord op)" : "Pilen peger, hvor du skal gå";
+}
+$("#navStop").onclick = stopNav;
+map.on("contextmenu", e => {
+  L.popup().setLatLng(e.latlng).setContent('<button class="primary" id="goHere">➜ Gå hertil</button>').openOn(map);
+  setTimeout(() => { const b = document.getElementById("goHere"); if (b) b.onclick = () => { map.closePopup(); goTo(e.latlng.lat, e.latlng.lng, "Punkt på kortet"); }; }, 0);
+});
+
+/* ------------------------------------------------------------------ spor: optag den rute, der er gået
+   Punkter gemmes, når GPS'en er god nok (±25 m) og man har flyttet sig 5 m. Undervejs gemmes sporet i kv «spor-igang»,
+   så det ikke går tabt, hvis appen lukkes. Skærmen holdes tændt (wake lock), fordi telefonen ellers stopper GPS'en. */
+let trackLine = null, wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && "wakeLock" in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) { /* ikke understøttet */ }
+}
+document.addEventListener("visibilitychange", () => { if (state.track && document.visibilityState === "visible") keepAwake(true); });
+function trackLength(pts) { let m = 0; for (let i = 1; i < pts.length; i++) m += map.distance(pts[i - 1], pts[i]); return m; }
+function drawTrack() {
+  const pts = state.track?.points.map(p => [p[0], p[1]]) || [];
+  if (!state.track) { if (trackLine) map.removeLayer(trackLine); trackLine = null; }
+  else if (trackLine) trackLine.setLatLngs(pts);
+  else trackLine = L.polyline(pts, { color: "#e8710a", weight: 4, opacity: 0.9, interactive: false }).addTo(map);
+  const b = $("#btnTrack");
+  if (b) b.textContent = state.track ? `■ Stop ruten (${fmtLen(trackLength(pts))})` : "● Optag ruten, jeg går";
+  $("#trackDot").classList.toggle("hidden", !state.track);
+}
+function trackPoint(lat, lon, acc, t) {
+  const tr = state.track; if (!tr || acc > 25) return;
+  const last = tr.points[tr.points.length - 1];
+  if (last && map.distance([last[0], last[1]], [lat, lon]) < 5) return;
+  tr.points.push([+lat.toFixed(6), +lon.toFixed(6), Math.round((t || Date.now()) / 1000)]);
+  db.put("kv", tr, "spor-igang").catch(() => {});
+  drawTrack();
+}
+async function toggleTrack() {
+  if (!state.track) {
+    state.track = { id: uid(), start: new Date().toISOString(), ejendom: state.data?.name || null, points: [] };
+    await db.put("kv", state.track, "spor-igang"); keepAwake(true); drawTrack();
+    if (state.me) trackPoint(state.me.lat, state.me.lon, state.me.accuracy, Date.now());
+    return toast("Ruten optages. Hold appen åben, så GPS'en kører.", 5000);
+  }
+  const tr = state.track; state.track = null; keepAwake(false); drawTrack(); await db.del("kv", "spor-igang");
+  if (tr.points.length < 2) return toast("Ruten var for kort til at blive gemt");
+  const len = trackLength(tr.points.map(p => [p[0], p[1]]));
+  const reg = { id: tr.id, type: "spor", created: tr.start, lat: tr.points[0][0], lon: tr.points[0][1], stand: null, ejendom: tr.ejendom,
+    data: { points: tr.points, length_m: Math.round(len), minutes: (tr.points[tr.points.length - 1][2] - tr.points[0][2]) / 60, note: "" } };
+  await saveReg(reg); trackForm({ ...reg, data: { ...reg.data } });
+}
+function trackForm(reg) {
+  openSheet(`<div class="head"><h3>Rute · ${fmtLen(reg.data.length_m)}</h3><button class="close">Luk</button></div>
+    <p class="muted">${new Date(reg.created).toLocaleString("da-DK", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} ·
+      ${Math.round(reg.data.minutes || 0)} min · ${reg.data.points.length} punkter</p>
+    <label>Note til ruten</label><textarea id="sNote">${esc(reg.data.note || "")}</textarea>
+    <div class="stack"><button class="primary big" id="sSave">Gem</button><button class="danger" id="sDel">Slet ruten</button></div>`);
+  map.fitBounds(L.latLngBounds(reg.data.points.map(p => [p[0], p[1]])).pad(0.2));
+  $("#sSave").onclick = async () => { reg.data.note = $("#sNote").value.trim(); await saveReg(reg); closeSheet(); toast("Ruten er gemt"); };
+  $("#sDel").onclick = () => deleteReg(reg);
+}
+
+/* ------------------------------------------------------------------ flere ejendomme på telefonen
+   Hver ejendom gemmes for sig: kv «skovkort:<id>», kv «ortofoto:<id>» og fliser med nøglen «<id>|z/x/y».
+   kv «ejendomme» er listen, kv «aktiv» er den viste. Registreringerne har ejendommens navn (reg.ejendom). */
+const propId = d => d.pakke?.sync?.noegle || "navn:" + (d.name || "skov");
+async function removeTiles(ortho) {
+  if (!ortho) return;
+  if (ortho.prefix) return db.delPrefix("tiles", ortho.prefix);
+  const keys = await db.keys("tiles");               // ældre version: fliser uden ejendom foran
+  await db.tx("tiles", "readwrite", s => { for (const k of keys) if (/^\d+\/\d+\/\d+$/.test(k)) s.delete(k); });
+}
+async function propertyList() { return (await db.get("kv", "ejendomme")) || []; }
+async function rememberProperty(d) {
+  const list = (await propertyList()).filter(p => p.id !== d.id);
+  const o = await db.get("kv", "ortofoto:" + d.id);
+  list.push({ id: d.id, name: d.name, kunde: d.pakke?.kunde || null, loaded: d.loaded, ortho: !!o, tiles: o?.tiles || 0, url: onlinePackageUrlFor(d) });
+  list.sort((a, b) => a.name.localeCompare(b.name, "da"));
+  await db.put("kv", list, "ejendomme");
+}
+function onlinePackageUrlFor(d) {
+  const c = d?.pakke?.sync;
+  return c?.rest && c?.noegle ? c.rest.replace(/\/rest\/v1\/?$/, "") + `/storage/v1/object/public/feltpakker/${c.noegle}/feltpakke.zip` : null;
+}
+async function activateProperty(d, ortho) {
+  state.data = d; state.ortho = ortho || null; state.selected = null;
+  await db.put("kv", d.id, "aktiv");
+  state.regs = regsFor(d); state.syncHash = syncCfg() ? safeLS("syncHash:" + syncCfg().noegle) : null;
+  drawData(); fitData(); setBasemap(state.ortho ? 0 : (state.basemap || 1)); drawRegMarkers(); restyle(); refreshMenuInfo();
+}
+async function switchProperty(id) {
+  if (state.data?.id === id) return closeSheet();
+  if (syncCfg() && state.regs.some(r => !r.synced)) { try { await syncNow(false); } catch (e) { /* sendes senere */ } }
+  const d = await db.get("kv", "skovkort:" + id);
+  if (!d) return toast("Ejendommen findes ikke længere på telefonen");
+  closeSheet(); await activateProperty(d, await db.get("kv", "ortofoto:" + id)); toast(d.name);
+}
+async function removeProperty(id) {
+  const p = (await propertyList()).find(x => x.id === id); if (!p) return;
+  const waiting = state.allRegs.filter(r => r.ejendom === p.name && !r.synced && !r.exported).length;
+  if (!confirm(`Fjern ${p.name} fra telefonen?` + (waiting ? `\n\n${waiting} registreringer er ikke sendt endnu og bliver også slettet.` : ""))) return;
+  await removeTiles(await db.get("kv", "ortofoto:" + id));
+  await db.del("kv", "skovkort:" + id); await db.del("kv", "ortofoto:" + id);
+  for (const r of state.allRegs.filter(r => r.ejendom === p.name)) await db.del("regs", r.id);
+  dropRegs(r => r.ejendom === p.name);
+  await db.put("kv", (await propertyList()).filter(x => x.id !== id), "ejendomme");
+  if (state.data?.id === id) {
+    const next = (await propertyList())[0];
+    if (next) await switchProperty(next.id); else { state.data = null; state.ortho = null; state.regs = []; drawData(); setBasemap(1); await db.del("kv", "aktiv"); showWelcome(true); }
+  }
+  propertySheet();
+}
+/* Gamle versioner havde én ejendom i kv «skovkort»/«ortofoto». */
+async function migrateSingle() {
+  const old = await db.get("kv", "skovkort"); if (!old) return;
+  old.id = propId(old);
+  await db.put("kv", old, "skovkort:" + old.id);
+  const o = await db.get("kv", "ortofoto"); if (o) await db.put("kv", { ...o, prefix: "" }, "ortofoto:" + old.id);
+  await db.put("kv", old.id, "aktiv"); await rememberProperty(old);
+  await db.del("kv", "skovkort"); await db.del("kv", "ortofoto");
+}
+async function propertySheet() {
+  const list = await propertyList();
+  let customer = null;
+  const url = safeLS("kundeUrl");
+  if (url && navigator.onLine) {
+    try { const res = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store" }); if (res.ok) customer = await res.json(); } catch (e) { /* uden net */ }
+  }
+  const local = new Set(list.map(p => p.name));
+  const remote = (customer?.ejendomme || []).filter(e => !local.has(e.navn));
+  const mb = n => n ? ` · ortofoto` : " · uden ortofoto";
+  $("#empty").classList.add("hidden");
+  openSheet(`<div class="head"><h3>Ejendomme</h3><button class="close">Luk</button></div>
+    ${list.length ? `<p class="muted">På telefonen (virker uden net):</p><ul class="list">${list.map(p => `<li><div class="grow"><b>${esc(p.name)}</b>
+      <br><span class="muted">${p.id === state.data?.id ? "vises nu" : "hentet " + new Date(p.loaded).toLocaleDateString("da-DK")}${mb(p.ortho)}</span></div>
+      ${p.id === state.data?.id ? "" : `<button class="primary" data-open="${esc(p.id)}">Åbn</button>`}
+      ${p.url ? `<button data-update="${esc(p.id)}" title="Hent nyeste version">↻</button>` : ""}
+      <button class="danger" data-remove="${esc(p.id)}" title="Fjern fra telefonen">✕</button></li>`).join("")}</ul>` : ""}
+    ${remote.length ? `<p class="muted">${esc(customer.kunde || "Flere ejendomme")} – kan hentes:</p><ul class="list">${remote.map((e, i) => `<li><div class="grow"><b>${esc(e.navn)}</b></div>
+      <button class="primary" data-get="${i}">Hent</button></li>`).join("")}</ul>` : ""}
+    ${url && !customer ? `<p class="muted">Kundens øvrige ejendomme vises, når telefonen har net.</p>` : ""}
+    <button class="big" data-act="packageLink">Indsæt link fra SkovPlan</button>
+    <button class="big" data-act="openGpkg">Vælg feltpakke-fil</button>`);
+  sheet.querySelectorAll("[data-open]").forEach(b => b.onclick = () => switchProperty(b.dataset.open));
+  sheet.querySelectorAll("[data-remove]").forEach(b => b.onclick = () => removeProperty(b.dataset.remove));
+  sheet.querySelectorAll("[data-update]").forEach(b => b.onclick = () => { const p = list.find(x => x.id === b.dataset.update); closeSheet(); downloadPackage(p.url); });
+  sheet.querySelectorAll("[data-get]").forEach(b => b.onclick = async () => {
+    const e = remote[+b.dataset.get]; closeSheet();
+    if (syncCfg() && state.regs.some(r => !r.synced)) { try { await syncNow(false); } catch (err) { /* sendes senere */ } }
+    downloadPackage(e.url);
+  });
+}
+
 /* ------------------------------------------------------------------ start */
 (async function start() {
   try { await navigator.storage?.persist?.(); } catch (e) { /* ok */ }
   try {
-    state.data = await db.get("kv", "skovkort");
-    state.ortho = await db.get("kv", "ortofoto");
-    state.regs = await db.all("regs");
+    await migrateSingle();
+    state.allRegs = await db.all("regs");
+    const aktiv = await db.get("kv", "aktiv");
+    if (aktiv) { state.data = await db.get("kv", "skovkort:" + aktiv); state.ortho = await db.get("kv", "ortofoto:" + aktiv); }
+    state.regs = regsFor(state.data);
+    const running = await db.get("kv", "spor-igang");
+    if (running) { state.track = running; keepAwake(true); setTimeout(() => { drawTrack(); toast("Ruten optages stadig", 4000); }, 500); }
   } catch (e) { console.error(e); toast("Telefonens lager kunne ikke åbnes: " + e.message, 6000); }
   const saved = safeLS("basemap"); setBasemap(saved === null ? 0 : +saved % BASEMAPS.length);
   if (state.data) { drawData(); fitData(); }

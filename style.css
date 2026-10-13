@@ -111,3 +111,18 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
 #btnMenu.pending::after { content: ""; position: absolute; top: 8px; right: 6px; width: 10px; height: 10px; border-radius: 50%;
   background: #f29900; border: 2px solid var(--green); }
 .ok-note { background: #e6f4ea; color: #0b5c2a; padding: 8px 10px; border-radius: 8px; }
+
+#navbar { position: fixed; top: calc(60px + env(safe-area-inset-top)); left: 8px; right: 8px; z-index: 900; background: #fff;
+  border-radius: 14px; box-shadow: 0 2px 12px rgba(0,0,0,.25); display: flex; align-items: center; gap: 12px; padding: 8px 10px; }
+#navbar .grow { flex: 1; line-height: 1.25; }
+#navDist { font-size: 20px; }
+#navArrow { width: 52px; height: 52px; border-radius: 50%; background: var(--green); color: #fff; font-size: 30px;
+  display: flex; align-items: center; justify-content: center; transition: transform .25s; }
+#navArrow::before { content: ""; }
+#navArrow { writing-mode: horizontal-tb; }
+#navArrow.here { background: #0b8043; }
+#navStop { min-height: 40px; width: 44px; }
+.nav-target { width: 22px; height: 22px; border-radius: 50%; background: #1a73e8; border: 3px solid #fff; box-shadow: 0 0 0 2px #1a73e8; }
+#trackDot { position: fixed; left: 10px; bottom: calc(24px + env(safe-area-inset-bottom)); z-index: 900; background: #c5221f; color: #fff;
+  padding: 6px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; }
+#navbar:not(.hidden) ~ #toast, body:has(#navbar:not(.hidden)) #toast { top: calc(170px + env(safe-area-inset-top)); }

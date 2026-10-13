@@ -19,6 +19,12 @@
 </header>
 
 <div id="map"></div>
+<div id="navbar" class="hidden">
+  <div id="navArrow">➤</div>
+  <div class="grow"><b id="navDist">…</b><br><span id="navLabel"></span><br><small id="navHint" class="muted"></small></div>
+  <button id="navStop" aria-label="Stop">✕</button>
+</div>
+<div id="trackDot" class="hidden">● Optager rute</div>
 
 <div id="empty" class="overlay hidden">
   <div class="card welcome">
@@ -39,6 +45,7 @@
 <nav id="menu" class="hidden">
   <button data-act="welcome">Åbn feltpakke / skovkort</button>
   <button data-act="install" id="btnInstall" class="hidden">📲 Installér som app på telefonen</button>
+  <button data-act="track" id="btnTrack">● Optag ruten, jeg går</button>
   <button data-act="generalNote">Ny generel note med billeder</button>
   <button data-act="chooseProperty" id="btnChoose" class="hidden">Skift ejendom</button>
   <button data-act="updatePackage" id="btnUpdatePkg" class="hidden">Hent nyeste feltpakke (online)</button>
