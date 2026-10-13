@@ -1557,5 +1557,13 @@ async function propertySheet() {
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); state.installPrompt = e; $("#btnInstall")?.classList.remove("hidden"); });
   if (!standalone && /iPhone|iPad/.test(navigator.userAgent)) $("#btnInstall")?.classList.remove("hidden");
-  if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW", e));
+  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register("sw.js").then(r => r.update()).catch(e => console.warn("SW", e));
+    // Ny version installeret: genindlæs, når der ikke står en formular åben; ellers sig det.
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!had) return;
+      if (sheet.classList.contains("hidden")) location.reload(); else toast("Ny version af appen er klar. Luk og åbn appen for at få den.", 6000);
+    });
+  }
 })();

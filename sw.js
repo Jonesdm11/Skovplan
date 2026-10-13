@@ -1,5 +1,5 @@
 /* SkovPlan Felt – service worker: appen virker uden net, og kortfliser gemmes, når de er set. */
-const APP = "skovplan-felt-v14";
+const APP = "skovplan-felt-v15";
 const TILES = "skovplan-felt-tiles";
 const SHELL = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest", "favicon.png", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
   "logo.png", "logo-symbol.png",
@@ -29,7 +29,7 @@ self.addEventListener("fetch", e => {
   }
   if (url.origin === location.origin) {
     // Netværk først (så nye versioner kommer med), cache når der ikke er net.
-    e.respondWith(fetch(e.request).then(res => {
+    e.respondWith(fetch(e.request, { cache: "no-cache" }).then(res => {   // forbi browserens 10-min-cache, så rettelser kommer med det samme
       if (res.ok) caches.open(APP).then(c => c.put(e.request, res.clone()));
       return res;
     }).catch(() => caches.match(e.request, { ignoreSearch: true }).then(r => r || caches.match("index.html"))));
