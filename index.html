@@ -27,6 +27,7 @@
     <p>Åbn <b>feltpakken</b> fra din skovplan. Den hedder <b>Feltpakke_<i>skovens navn</i>.zip</b> og ligger i Google Drev eller er delt med dig.</p>
     <ul class="status"><li id="stMap">Skovkort mangler</li><li id="stOrtho">Ortofoto mangler</li></ul>
     <button class="primary big" data-act="openGpkg">Åbn feltpakke</button>
+    <button class="big" data-act="packageLink">Hent med link fra SkovPlan</button>
     <p class="muted">Pakken indeholder skovkort og ortofoto. Begge gemmes på telefonen og virker derefter uden net.
       Du kan også vælge <b>skovdriftsplan.gpkg</b> og <b>ortofoto_feltapp.mbtiles</b> hver for sig.</p>
     <button class="big hidden" id="welcomeClose" data-act="closeWelcome">Fortsæt</button>
@@ -39,6 +40,7 @@
   <button data-act="welcome">Åbn feltpakke / skovkort</button>
   <button data-act="install" id="btnInstall" class="hidden">📲 Installér som app på telefonen</button>
   <button data-act="generalNote">Ny generel note med billeder</button>
+  <button data-act="updatePackage" id="btnUpdatePkg" class="hidden">Hent nyeste feltpakke (online)</button>
   <button data-act="listAll">Alle registreringer</button>
   <button data-act="sync" id="btnSync" class="hidden">Send til SkovPlan nu (online)</button>
   <button data-act="export">Eksportér til SkovPlan (fil)</button>

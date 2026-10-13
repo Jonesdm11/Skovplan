@@ -925,6 +925,7 @@ function refreshMenuInfo() {
   $("#menuInfo").textContent = `${state.data ? (state.data.name + " · indlæst " + new Date(state.data.loaded).toLocaleDateString("da-DK")) : "Intet skovkort"} · ${state.ortho ? "ortofoto gemt" : "intet ortofoto"} · ${n} registreringer` +
     (c ? ` · online: ${ns ? ns + " venter" : "alt sendt"}${state.syncStatus ? " (" + state.syncStatus + ")" : ""}` : (ne ? `, ${ne} ikke eksporteret` : ""));
   $("#btnSync")?.classList.toggle("hidden", !c);
+  $("#btnUpdatePkg")?.classList.toggle("hidden", !onlinePackageUrl());
 }
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
@@ -936,6 +937,8 @@ const ACTIONS = {
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
   newPlot: () => newReg("proeveflade"), note: () => newReg("note"), taksation: () => newReg("taksation"),
   generalNote: () => newReg("note", true),
+  packageLink: askPackageLink,
+  updatePackage: () => { const u = onlinePackageUrl(); u ? downloadPackage(u) : askPackageLink(); },
   install: async () => {
     if (state.installPrompt) { state.installPrompt.prompt(); const r = await state.installPrompt.userChoice; state.installPrompt = null;
       if (r.outcome === "accepted") $("#btnInstall").classList.add("hidden"); return; }
@@ -995,6 +998,36 @@ async function openFiles(files) {
   }
   showWelcome();
 }
+/* Feltpakke online: SkovPlan lægger pakken i Supabase og giver et link …/?pakke=<adresse>. */
+function onlinePackageUrl() {
+  const c = state.data?.pakke?.sync;
+  if (c?.rest && c?.noegle) return c.rest.replace(/\/rest\/v1\/?$/, "") + `/storage/v1/object/public/feltpakker/${c.noegle}/feltpakke.zip`;
+  return safeLS("pakkeUrl");
+}
+function packageUrlFrom(text) {
+  text = String(text || "").trim(); if (!text) return null;
+  try { const u = new URL(text); const p = u.searchParams.get("pakke"); return p ? new URL(p).href : u.href; } catch (e) { return null; }
+}
+async function downloadPackage(url) {
+  if (!url) return;
+  if (!navigator.onLine) return toast("Telefonen har ikke net lige nu. Prøv igen, når den har.", 5000);
+  try {
+    const res = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error(res.status === 400 || res.status === 404 ? "pakken findes ikke (er linket rigtigt?)" : "HTTP " + res.status);
+    const total = +res.headers.get("content-length") || 0, reader = res.body.getReader(), parts = []; let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      parts.push(value); got += value.length;
+      toast(`Henter feltpakken … ${total ? Math.round(got / total * 100) + " %" : Math.round(got / 1048576) + " MB"}`, 60000);
+    }
+    safeLS("pakkeUrl", url);
+    await openFiles([new File(parts, "feltpakke.zip", { type: "application/zip" })]);
+  } catch (err) { console.error(err); toast("Feltpakken kunne ikke hentes: " + err.message, 7000); }
+}
+function askPackageLink() {
+  const url = packageUrlFrom(prompt("Indsæt linket til feltpakken, som du har fået fra SkovPlan:"));
+  if (url) downloadPackage(url); else toast("Det ligner ikke et link fra SkovPlan");
+}
 async function loadGpkg(g, f, meta) {
   const data = readGpkg(g, f);
   if (meta) { const { _extra, ...pakke } = meta; data.pakke = pakke; if (_extra) data.extra = _extra; }
@@ -1049,6 +1082,8 @@ function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelin
   if (state.data) { drawData(); fitData(); }
   showWelcome();
   drawRegMarkers(); startGps();
+  const linked = packageUrlFrom(new URLSearchParams(location.search).get("pakke") ? location.href : "");
+  if (linked) { history.replaceState(null, "", location.pathname); downloadPackage(linked); }
   if (syncCfg()) { state.syncHash = safeLS("syncHash:" + syncCfg().noegle); scheduleSync(); }
   // Installér som app (Android/Chrome viser sin egen dialog; iPhone: Del › Føj til hjemmeskærm)
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
