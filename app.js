@@ -401,54 +401,111 @@ function hydrateThumbs() {
   });
 }
 
-/* -------- prøveflade-formular */
+function speciesOptions(extra) {
+  const set = new Set(["Rødgran", "Sitkagran", "Douglasgran", "Ædelgran", "Nobilis", "Grandis", "Skovfyr", "Lærk", "Bøg", "Eg", "Ask", "Ahorn", "Birk", "Rødel", "Andet nåletræ", "Andet løvtræ"]);
+  const notTree = /^(sø|søer|å|vand|vandløb|vej|eng|mose|hede|hus|mark|agerjord|krat|overdrev|slette|græs|park|vildtager|liggeplads|lysåben|udyrket|anden anvendelse|andet$|ikke |bygning|naturareal|vådområde|skovbryn|naturlig succession|naturforyngelse)/i;
+  (state.data?.layers.skovafdelinger.features || []).forEach(f => { const a = f.properties["træart"]; if (a && !notTree.test(a)) set.add(a); });
+  if (extra) set.add(extra);
+  return [...set].filter(Boolean).sort((a, b) => a.localeCompare(b, "da"));
+}
+function perSpecies(p) {
+  const by = {};
+  for (const t of p.trees) { if (!num(t.d)) continue; (by[t.art || "?"] = by[t.art || "?"] || []).push(t); }
+  return Object.entries(by).map(([art, trees]) => ({ art, ...plotStats({ ...p, hg: null, trees }) })).sort((a, b) => b.G - a.G);
+}
+
+/* -------- prøveflade-formular: én række pr. træ, som et taksationsark */
 function plotForm(reg) {
-  const d = reg.data;
+  const d = reg.data, defArt = reg.stand?.art || "";
+  const arts = speciesOptions(defArt);
+  const blank = art => ({ art, d1: "", d2: "", h: "", note: "" });
+  const trees = d.trees.map(t => ({ art: t.art || defArt, d1: t.d1 ?? t.d ?? "", d2: t.d2 ?? "", h: t.h ?? "", note: t.note || "" }));
+  if (!trees.length) trees.push(blank(defArt));
+  /* Krydsklupning: gennemsnittet af de to målinger; kun én måling = den ene. */
+  const meanD = t => { const a = num(t.d1), b = num(t.d2); return a && b ? (a + b) / 2 : a || b || null; };
   openSheet(`
     <div class="head"><h3>Prøveflade · ${esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
     <div class="row">
       <div><label>Radius (m)</label><select id="pRadius">${RADII.map(r => `<option value="${r}" ${r === d.radius ? "selected" : ""}>${fmt(r, 2)} m (${Math.round(Math.PI * r * r)} m²)</option>`).join("")}</select></div>
       <div><label>Position</label><button id="pPos" style="width:100%">${reg.lat ? `±${Math.round(reg.accuracy || 0)} m ✓` : "Brug GPS"}</button></div>
     </div>
-    <div class="row">
-      <div><label>Diameter (cm)</label><input id="pD" inputmode="decimal" placeholder="fx 23,5" autocomplete="off"></div>
-      <div><label>Højde (m) – valgfri</label><input id="pH" inputmode="decimal" placeholder="" autocomplete="off"></div>
-      <div style="flex:0 0 auto"><button class="primary" id="pAdd">Tilføj</button></div>
-    </div>
-    <div class="trees" id="pTrees"></div>
+    <label>Enkelttræer – krydsklup: D1, Enter, D2, Enter … (D = gennemsnit)</label>
+    <div class="tablewrap"><table class="trees">
+      <thead><tr><th>Nr</th><th>Træart</th><th>D1 (cm)</th><th>D2 (cm)</th><th>D</th><th>H (m)</th><th>Bemærkning</th><th></th></tr></thead>
+      <tbody id="pRows"></tbody>
+    </table></div>
+    <button id="pAdd" style="width:100%;margin-top:6px">+ Træ</button>
     <div class="result" id="pRes"></div>
     <div class="row">
       <div><label>Hg (m) – hvis ikke målt på træer</label><input id="pHg" inputmode="decimal" value="${esc(d.hg ?? "")}"></div>
       <div><label>Bk (%)</label><input id="pBk" inputmode="numeric" value="${esc(d.bk ?? "")}"></div>
     </div>
-    <label>Note</label><textarea id="pNote">${esc(d.note || "")}</textarea>
+    <label>Note til prøvefladen</label><textarea id="pNote">${esc(d.note || "")}</textarea>
     <div class="stack">
       <button class="primary big" id="pSave">Gem prøveflade</button>
       ${reg._new ? "" : '<button class="danger" id="pDel">Slet prøveflade</button>'}
     </div>`, true);
-  const trees = d.trees.map(t => ({ ...t }));
-  const draw = () => {
-    $("#pTrees").innerHTML = trees.map((t, i) => `<button data-i="${i}" title="Tryk for at fjerne">${fmt(num(t.d), 1)}${num(t.h) ? " / " + fmt(num(t.h), 1) + " m" : ""} ✕</button>`).join("");
-    const s = plotStats({ radius: +$("#pRadius").value, trees, hg: $("#pHg").value });
-    $("#pRes").innerHTML = `<b>${s.n} træer</b> · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha · Dg ${fmt(s.Dg)} cm · Hg ${fmt(s.Hg)} m${s.heights ? ` (${s.heights} højder)` : ""}`;
+  const body = $("#pRows");
+  const opts = sel => arts.map(a => `<option ${a === sel ? "selected" : ""}>${esc(a)}</option>`).join("");
+  const rowHtml = (t, i) => `<tr data-i="${i}">
+      <td class="nr">${i + 1}</td>
+      <td><select data-k="art">${opts(t.art)}</select></td>
+      <td><input data-k="d1" inputmode="decimal" value="${esc(t.d1)}" enterkeyhint="next"></td>
+      <td><input data-k="d2" inputmode="decimal" value="${esc(t.d2)}" enterkeyhint="next"></td>
+      <td class="dm">${meanD(t) ? fmt(meanD(t), 1) : ""}</td>
+      <td><input data-k="h" inputmode="decimal" value="${esc(t.h)}" enterkeyhint="next"></td>
+      <td><input data-k="note" value="${esc(t.note)}" placeholder=""></td>
+      <td><button class="del" data-del="${i}" aria-label="Fjern træ">✕</button></td></tr>`;
+  const drawRows = () => { body.innerHTML = trees.map(rowHtml).join(""); };
+  const summary = () => {
+    const p = { radius: +$("#pRadius").value, trees: trees.filter(meanD).map(t => ({ ...t, d: meanD(t), h: num(t.h) })), hg: $("#pHg").value };
+    const s = plotStats(p), arts = perSpecies(p);
+    $("#pRes").innerHTML = `<b>${s.n} træer</b> · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha · Dg ${fmt(s.Dg)} cm · Hg ${fmt(s.Hg)} m${s.heights ? ` (${s.heights} højder)` : ""}`
+      + (arts.length > 1 ? "<br>" + arts.map(a => `${esc(a.art)}: ${a.n} stk, G ${fmt(a.G)}, Dg ${fmt(a.Dg)}`).join(" · ") : "");
   };
-  const add = () => {
-    const dv = num($("#pD").value); if (!dv || dv <= 0 || dv > 200) { toast("Skriv en diameter i cm"); $("#pD").focus(); return; }
-    trees.push({ d: dv, h: num($("#pH").value) }); $("#pD").value = ""; $("#pH").value = ""; $("#pD").focus(); draw();
+  const addRow = () => {
+    const last = trees[trees.length - 1];
+    trees.push(blank(last ? last.art : defArt));
+    drawRows(); summary();
+    body.querySelector(`tr[data-i="${trees.length - 1}"] input[data-k="d1"]`).focus();
   };
-  $("#pAdd").onclick = add;
-  $("#pD").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
-  $("#pH").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
-  $("#pTrees").onclick = e => { const b = e.target.closest("button"); if (b) { trees.splice(+b.dataset.i, 1); draw(); } };
-  $("#pRadius").onchange = draw; $("#pHg").oninput = draw;
+  body.addEventListener("input", e => {
+    const tr = e.target.closest("tr"), k = e.target.dataset.k; if (!tr || !k) return;
+    trees[+tr.dataset.i][k] = e.target.value; summary();
+    if (k === "d1" || k === "d2") { const m = meanD(trees[+tr.dataset.i]); tr.querySelector(".dm").textContent = m ? fmt(m, 1) : ""; }
+  });
+  body.addEventListener("change", e => {
+    const tr = e.target.closest("tr"), k = e.target.dataset.k; if (!tr || !k) return;
+    trees[+tr.dataset.i][k] = e.target.value; summary();
+  });
+  body.addEventListener("keydown", e => {
+    if (e.key !== "Enter") return; e.preventDefault();
+    const tr = e.target.closest("tr"), i = +tr.dataset.i, k = e.target.dataset.k;
+    if (k === "d1") { if (String(trees[i].d1).trim()) tr.querySelector('input[data-k="d2"]').focus(); return; }
+    if (!meanD(trees[i])) return;
+    const next = body.querySelector(`tr[data-i="${i + 1}"] input[data-k="d1"]`);
+    next ? next.focus() : addRow();
+  });
+  body.addEventListener("click", e => {
+    const b = e.target.closest("[data-del]"); if (!b) return;
+    trees.splice(+b.dataset.del, 1); if (!trees.length) trees.push(blank(defArt));
+    drawRows(); summary();
+  });
+  $("#pAdd").onclick = addRow;
+  $("#pRadius").onchange = summary; $("#pHg").oninput = summary;
   $("#pPos").onclick = () => { if (!state.me) return toast("Venter på GPS …"); Object.assign(reg, pos()); $("#pPos").textContent = `±${Math.round(reg.accuracy)} m ✓`; };
   $("#pSave").onclick = async () => {
-    reg.data = { radius: +$("#pRadius").value, trees, hg: num($("#pHg").value), bk: num($("#pBk").value), note: $("#pNote").value.trim() };
-    if (!trees.length && reg.data.hg === null) return toast("Prøvefladen er tom");
+    const badNum = v => String(v).trim() && (!num(v) || num(v) <= 0 || num(v) > 200);
+    const bad = trees.find(t => badNum(t.d1) || badNum(t.d2));
+    if (bad) return toast(`Træ ${trees.indexOf(bad) + 1}: diameteren skal være et tal i cm`);
+    const kept = trees.filter(meanD).map(t => ({ art: t.art, d1: num(t.d1), d2: num(t.d2), d: +meanD(t).toFixed(2), h: num(t.h), note: String(t.note || "").trim() }));
+    reg.data = { radius: +$("#pRadius").value, trees: kept, hg: num($("#pHg").value), bk: num($("#pBk").value), note: $("#pNote").value.trim() };
+    if (!kept.length && reg.data.hg === null) return toast("Prøvefladen er tom");
     await saveReg(reg); toast("Prøveflade gemt"); backToStand(reg);
   };
   if ($("#pDel")) $("#pDel").onclick = () => deleteReg(reg);
-  draw();
+  drawRows(); summary();
+  if (reg._new) body.querySelector('input[data-k="d1"]').focus();
 }
 
 /* -------- direkte taksation */
@@ -582,6 +639,23 @@ function buildTaxCsv() {
   }
   return { csv: "﻿" + lines.join("\r\n") + "\r\n", rows };
 }
+/* Alle målte træer, én række pr. træ – åbner direkte i Excel. */
+function buildTreeCsv() {
+  const head = ["Afd", "Litra", "Prøveflade", "Dato", "Radius (m)", "Træ nr", "Træart", "D1 (cm)", "D2 (cm)", "Diameter (cm)", "Højde (m)", "Bemærkning", "Bk (%)", "Note til prøvefladen", "Bredde", "Længde", "GPS ± (m)"];
+  const lines = [head.join(";")]; let rows = 0;
+  const plots = state.regs.filter(r => r.type === "proeveflade").sort((a, b) => (a.stand?.label || "").localeCompare(b.stand?.label || "", "da") || a.created.localeCompare(b.created));
+  const nrBy = {};
+  for (const p of plots) {
+    const key = p.stand?.key || "-"; nrBy[key] = (nrBy[key] || 0) + 1;
+    p.data.trees.forEach((t, i) => {
+      lines.push([p.stand?.afd ?? "", p.stand?.litra ?? "", nrBy[key], p.created.slice(0, 10), csvNum(p.data.radius, 2), i + 1, t.art || p.stand?.art || "",
+        csvNum(num(t.d1 ?? t.d), 1), csvNum(num(t.d2), 1), csvNum(num(t.d), 1), csvNum(num(t.h), 1), t.note || "", i === 0 ? csvNum(num(p.data.bk), 0) : "", i === 0 ? (p.data.note || "") : "",
+        p.lat ? p.lat.toFixed(6).replace(".", ",") : "", p.lon ? p.lon.toFixed(6).replace(".", ",") : "", p.accuracy ? Math.round(p.accuracy) : ""].map(csvCell).join(";"));
+      rows++;
+    });
+  }
+  return { csv: "\ufeff" + lines.join("\r\n") + "\r\n", rows };
+}
 function photoName(r) { return `fotos/${(r.stand?.label || "uden-litra").replace(/[^\wæøåÆØÅ-]+/g, "_")}_${r.created.slice(0, 19).replace(/[:T]/g, "-")}_${r.id.slice(-4)}.jpg`; }
 function buildGeoJSON() {
   return {
@@ -603,11 +677,13 @@ async function doExport() {
   const zip = new JSZip(), stamp = today(), { csv, rows } = buildTaxCsv();
   zip.file(`taksationsark_felt_${stamp}.csv`, csv);
   zip.file("registreringer.geojson", JSON.stringify(buildGeoJSON(), null, 1));
+  const trees = buildTreeCsv(); if (trees.rows) zip.file(`enkelttraeer_${stamp}.csv`, trees.csv);
   state.regs.filter(r => r.photo).forEach(r => zip.file(photoName(r), r.photo));
   zip.file("LAES-MIG.txt", [
     `SkovPlan Felt – eksport ${new Date().toLocaleString("da-DK")}`, `Skov: ${state.data?.name || ""}`, "",
     `taksationsark_felt_${stamp}.csv: ${rows} litra. Indlæs i SkovPlan med «Importér bevoksningsliste fra Excel/CSV…».`,
     "  Tomme celler betyder «behold SkovPlans tal». Hg/Dg/stamtal/grundflade er beregnet fra prøvefladerne (gennemsnit pr. litra).",
+    "enkelttraeer_<dato>.csv: alle målte træer, én række pr. træ (art, diameter, højde, bemærkning). Åbner i Excel.",
     "registreringer.geojson: alle prøveflader, fotos og noter som punkter (WGS84). Kan trækkes direkte ind i QGIS.",
     "fotos/: billederne; filnavnet står i feltet «foto» i geojson-filen.",
   ].join("\r\n"));

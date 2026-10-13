@@ -1,5 +1,5 @@
 /* SkovPlan Felt – service worker: appen virker uden net, og kortfliser gemmes, når de er set. */
-const APP = "skovplan-felt-v2";
+const APP = "skovplan-felt-v3";
 const TILES = "skovplan-felt-tiles";
 const SHELL = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png",
   "lib/leaflet.js", "lib/leaflet.css", "lib/sql-wasm.js", "lib/sql-wasm.wasm", "lib/jszip.min.js",
