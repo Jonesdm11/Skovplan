@@ -126,3 +126,20 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
 #trackDot { position: fixed; left: 10px; bottom: calc(24px + env(safe-area-inset-bottom)); z-index: 900; background: #c5221f; color: #fff;
   padding: 6px 12px; border-radius: 16px; font-size: 13px; font-weight: 600; }
 #navbar:not(.hidden) ~ #toast, body:has(#navbar:not(.hidden)) #toast { top: calc(170px + env(safe-area-inset-top)); }
+/* stakke og stokke */
+.seg { display: flex; gap: 0; margin: 8px 0 4px; border: 1px solid #c9d3c9; border-radius: 10px; overflow: hidden; }
+.seg button { flex: 1; border: 0; border-radius: 0; margin: 0; background: #fff; padding: 10px 4px; }
+.seg button + button { border-left: 1px solid #c9d3c9; }
+.seg button.on { background: #1f5f3a; color: #fff; font-weight: 600; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.small { font-size: 13px; margin: 2px 0 6px; }
+#sheet h4 { margin: 14px 0 2px; font-size: 15px; color: #1f5f3a; }
+table.stokke { width: 100%; border-collapse: collapse; margin: 4px 0 8px; }
+table.stokke th { font-size: 12px; font-weight: 500; color: #666; text-align: left; padding: 2px; }
+table.stokke td { padding: 2px; }
+table.stokke td:first-child { color: #888; font-size: 13px; width: 20px; }
+table.stokke input { width: 100%; min-width: 0; padding: 8px 6px; }
+table.stokke td.v { font-size: 13px; text-align: right; white-space: nowrap; width: 48px; }
+table.stokke button { padding: 6px 10px; }
+.search { display: flex; gap: 8px; margin: 10px 0 4px; }
+.search input { flex: 1; }
