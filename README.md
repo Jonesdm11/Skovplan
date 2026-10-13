@@ -2,26 +2,23 @@
 
 En lille webapp, der installeres fra browseren ("Føj til startskærm") og virker uden net bagefter. Ingen app store.
 
-## Det kan den
-- Åbne skovens GeoPackage direkte på telefonen (fx `skovdriftsplan.gpkg` fra Google Drev). Viser litraer farvet efter træart, veje, kortlinjer og ejendomsgrænse.
-- Vise din GPS-position og hvilket litra du står i.
-- Tryk på et litra: se art, alder, Hg, Dg, stamtal, G, vedmasse og bemærkning.
-- **Prøveflade**: radius (5,64/7,98/10/12,62/15 m), diametre (+ evt. højder) træ for træ. Beregner stamtal/ha, G/ha, Dg (d³/d²) og Hg (grundfladevægtet af målte højder).
-- **Direkte taksation** af et litra (Hg, Dg, stamtal, G, vedmasse, Bk, ny træart).
-- **Fotos** (kamera, formindskes til 1600 px) og **noter**, med GPS-punkt og litra.
-- **Eksportér til SkovPlan**: en zip med
-  - `taksationsark_felt_<dato>.csv` – samme kolonner som SkovPlans taksationsark; indlæses med «Importér bevoksningsliste fra Excel/CSV…» (afprøvet mod `taksationsark.parse_sheet`).
-  - `registreringer.geojson` – alle punkter med data (kan trækkes ind i QGIS).
-  - `fotos/`.
-  Deles via telefonens del-menu (Drev, mail …).
+Adresse: https://jonesdm11.github.io/Skovplan/
 
-## Begrænsninger i prototypen
-- Ortofoto: SkovPlans gemte ortofoto laves om til `Ortofoto/ortofoto_feltapp.mbtiles` i ejendomsmappen (JPEG-fliser, zoom 12–18). Åbn den i appen, så gemmes den på telefonen.
-- Litrafarver: samme farver som SkovPlan-projektet (træart → farve), arter uden fast farve får SkovPlans automatiske farve.
-- Vedmasse beregnes ikke af prøvefladerne (feltet efterlades tomt = SkovPlan beholder sit tal).
-- Fotos og noter kommer ikke automatisk ind i SkovPlans gpkg endnu; de ligger i geojson + fotos-mappen.
+## Sådan bruges den
+1. **I SkovPlan:** Import og ældre driftsplaner › **Lav feltpakke til appen…** Det laver `Eksporter/Feltapp/Feltpakke_<ejendom>.zip` med skovkort og ortofoto.
+2. **På telefonen:** åbn appen, tryk **Åbn feltpakke** og vælg filen i Drev. Kort og ortofoto gemmes på telefonen og virker uden net.
+3. **I skoven:** prøveflader (krydsklupning, træ for træ), direkte taksation, fotos og noter.
+4. **Eksportér til SkovPlan (Drev):** gem zip-filen i Drev-mappen **SkovPlan Felt**.
+5. **I SkovPlan:** **Hent data fra app…** finder selv den nyeste eksport til ejendommen og indlæser litra-tal, prøveflader, fotos og noter.
+
+Appen kan også åbne `skovdriftsplan.gpkg` og `ortofoto_feltapp.mbtiles` hver for sig. Filtypen afgøres af indholdet, ikke navnet.
+
+## Det kan den
+- Litraer farvet som i SkovPlan, veje, kortlinjer og ejendomsgrænse oven på ortofotoet.
+- GPS-position og hvilket litra du står i; tryk på et litra for art, alder, Hg, Dg, stamtal, G, vedmasse og bemærkning.
+- **Prøveflade**: radius (5,64/7,98/10/12,62/15 m), træ-tabel med D1/D2 (krydsklupning), højde og bemærkning. Beregner stamtal/ha, G/ha, Dg (d³/d²) og Hg (grundfladevægtet).
+- **Direkte taksation**, **fotos** (1600 px) og **noter** med GPS-punkt og litra.
+- Eksporten indeholder `taksationsark_felt_<dato>.csv`, `enkelttraeer_<dato>.csv`, `registreringer.geojson` og `fotos/`.
 
 ## Hosting
-Appen skal ligge på en https-adresse (krav for GPS, kamera og offline). Mappen her kan lægges som den er på GitHub Pages eller Netlify. Alle biblioteker ligger i `lib/`, så intet hentes udefra ud over kortfliser.
-
-Adresse: https://jonesdm11.github.io/Skovplan/
+GitHub Pages fra `main`. Alle biblioteker ligger i `lib/`, så intet hentes udefra ud over OpenStreetMap-fliser.

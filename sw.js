@@ -1,7 +1,8 @@
 /* SkovPlan Felt – service worker: appen virker uden net, og kortfliser gemmes, når de er set. */
-const APP = "skovplan-felt-v3";
+const APP = "skovplan-felt-v4";
 const TILES = "skovplan-felt-tiles";
-const SHELL = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png",
+const SHELL = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest", "favicon.png", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
+  "logo.png", "logo-symbol.png",
   "lib/leaflet.js", "lib/leaflet.css", "lib/sql-wasm.js", "lib/sql-wasm.wasm", "lib/jszip.min.js",
   "lib/images/marker-icon.png", "lib/images/marker-shadow.png", "lib/images/layers.png"];
 const MAX_TILES = 4000;

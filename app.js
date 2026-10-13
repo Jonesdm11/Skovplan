@@ -2,7 +2,8 @@
  *
  * Læser skovens GeoPackage direkte på telefonen (sql.js), viser litraerne på et
  * kort med GPS-position og gemmer prøveflader, fotos og noter i telefonens
- * IndexedDB.  «Eksportér» laver en zip med:
+ * IndexedDB.  Skovkort og ortofoto kommer fra SkovPlans «Lav feltpakke til appen» (én zip).
+ * «Eksportér» laver en zip, som SkovPlan henter med «Hent data fra app»:
  *   - taksationsark_felt_<dato>.csv  – samme kolonner som SkovPlans taksationsark,
  *     så filen kan indlæses med «Importér bevoksningsliste fra Excel/CSV…»
  *   - registreringer.geojson         – alle registreringer som punkter (WGS84)
@@ -122,10 +123,13 @@ function sqliteBytes(buf) {
   if (b.length > 100 && b[18] === 2 && b[19] === 2) { b[18] = 1; b[19] = 1; }
   return b;
 }
-async function readGpkg(file) {
+async function openSqlite(file) {
   SQL = SQL || await initSqlJs({ locateFile: f => "lib/" + f });
-  const g = new SQL.Database(sqliteBytes(await file.arrayBuffer()));
-  try {
+  return new SQL.Database(sqliteBytes(await file.arrayBuffer()));
+}
+const hasTable = (g, t) => !!g.exec(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t}'`)[0];
+function readGpkg(g, file) {
+  {
     const contents = {};
     const r = g.exec("SELECT table_name, srs_id FROM gpkg_contents WHERE data_type='features'");
     (r[0]?.values || []).forEach(([t, srs]) => contents[t] = srs);
@@ -155,7 +159,7 @@ async function readGpkg(file) {
     let propName = "";
     try { propName = g.exec("SELECT navn FROM ejendomsgraense WHERE navn IS NOT NULL LIMIT 1")[0]?.values[0][0] || ""; } catch (e) { /* intet */ }
     return { layers: out, name: propName || file.name.replace(/\.gpkg$/i, ""), file: file.name, loaded: new Date().toISOString() };
-  } finally { g.close(); }
+  }
 }
 
 /* ------------------------------------------------------------------ prøveflade-beregning */
@@ -201,14 +205,32 @@ const state = { data: null, regs: [], selected: null, me: null, standLayer: null
 const map = L.map("map", { zoomControl: false, attributionControl: true, maxZoom: 21 }).setView([56.0, 9.5], 7);
 L.control.zoom({ position: "bottomright" }).addTo(map);
 /* Ortofoto fra SkovPlan (MBTiles, gemt i telefonens IndexedDB) */
+/* Fliserne tegnes på et lærred, så kanten af ortofotoet (sort i JPEG-fliser) males grå uden for fotoets udstrækning. */
 const OrthoLayer = L.GridLayer.extend({
   createTile(c, done) {
-    const img = document.createElement("img"); img.alt = "";
+    const cv = document.createElement("canvas"); cv.width = cv.height = 256;
     db.get("tiles", `${c.z}/${c.x}/${c.y}`).then(b => {
-      if (b) { img.onload = () => { URL.revokeObjectURL(img.src); done(null, img); }; img.src = URL.createObjectURL(b); }
-      else done(null, img);
-    }).catch(e => done(e, img));
-    return img;
+      if (!b) return done(null, cv);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(img.src);
+        const g = cv.getContext("2d"); g.drawImage(img, 0, 0, 256, 256);
+        const bb = this.options.bounds;
+        if (bb) {
+          const a = this._map.project(bb.getNorthWest(), c.z), z = this._map.project(bb.getSouthEast(), c.z);
+          const x0 = a.x - c.x * 256, y0 = a.y - c.y * 256, x1 = z.x - c.x * 256, y1 = z.y - c.y * 256;
+          g.fillStyle = "#dddddd";
+          if (y0 > 0) g.fillRect(0, 0, 256, Math.ceil(y0));
+          if (y1 < 256) g.fillRect(0, Math.floor(y1), 256, 256);
+          if (x0 > 0) g.fillRect(0, 0, Math.ceil(x0), 256);
+          if (x1 < 256) g.fillRect(Math.floor(x1), 0, 256, 256);
+        }
+        done(null, cv);
+      };
+      img.onerror = () => done(null, cv);
+      img.src = URL.createObjectURL(b);
+    }).catch(e => done(e, cv));
+    return cv;
   },
 });
 const BASEMAPS = [
@@ -229,7 +251,7 @@ function setBasemap(i) {
   state.basemap = i; const b = BASEMAPS[i]; if (b.layer) b.layer.addTo(map).bringToBack();
   try { localStorage.setItem("basemap", i); } catch (e) { /* ok */ }
 }
-function safeLS(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function safeLS(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
 
 /* SkovPlans litrafarver (træart -> fyldfarve), som de står i SkovPlan-projektet. */
 const SPECIES_COLORS = {
@@ -676,12 +698,13 @@ async function doExport() {
   if (!state.regs.length) return toast("Der er intet at eksportere endnu");
   const zip = new JSZip(), stamp = today(), { csv, rows } = buildTaxCsv();
   zip.file(`taksationsark_felt_${stamp}.csv`, csv);
-  zip.file("registreringer.geojson", JSON.stringify(buildGeoJSON(), null, 1));
+  zip.file("registreringer.geojson", JSON.stringify({ ...buildGeoJSON(), skovplan: { ejendom: state.data?.name || null, ...(state.data?.pakke || {}) } }, null, 1));
   const trees = buildTreeCsv(); if (trees.rows) zip.file(`enkelttraeer_${stamp}.csv`, trees.csv);
   state.regs.filter(r => r.photo).forEach(r => zip.file(photoName(r), r.photo));
   zip.file("LAES-MIG.txt", [
     `SkovPlan Felt – eksport ${new Date().toLocaleString("da-DK")}`, `Skov: ${state.data?.name || ""}`, "",
-    `taksationsark_felt_${stamp}.csv: ${rows} litra. Indlæs i SkovPlan med «Importér bevoksningsliste fra Excel/CSV…».`,
+    "Hent filen ind i SkovPlan med «Hent data fra app» (Import og ældre driftsplaner).", "",
+    `taksationsark_felt_${stamp}.csv: ${rows} litra (indlæses automatisk af «Hent data fra app»).`,
     "  Tomme celler betyder «behold SkovPlans tal». Hg/Dg/stamtal/grundflade er beregnet fra prøvefladerne (gennemsnit pr. litra).",
     "enkelttraeer_<dato>.csv: alle målte træer, én række pr. træ (art, diameter, højde, bemærkning). Åbner i Excel.",
     "registreringer.geojson: alle prøveflader, fotos og noter som punkter (WGS84). Kan trækkes direkte ind i QGIS.",
@@ -690,14 +713,22 @@ async function doExport() {
   const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
   const name = `skovplan-felt_${(state.data?.name || "skov").replace(/[^\wæøåÆØÅ-]+/g, "_")}_${stamp}.zip`;
   const file = new File([blob], name, { type: "application/zip" });
-  let shared = false;
-  if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: name }); shared = true; } catch (e) { if (e.name === "AbortError") return; }
-  }
-  if (!shared) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
-  const t = new Date().toISOString();
-  for (const r of state.regs) { r.exported = t; await db.put("regs", r); }
-  refreshMenuInfo(); toast(`Eksporteret: ${state.regs.length} registreringer, ${rows} litra i taksationsarket`, 4000);
+  const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+  openSheet(`<div class="head"><h3>Gem eksporten</h3><button class="close">Luk</button></div>
+    <p><b>${esc(name)}</b> · ${blob.size < 1048576 ? Math.max(1, Math.round(blob.size / 1024)) + " kB" : fmt(blob.size / 1048576, 1) + " MB"} · ${state.regs.length} registreringer</p>
+    ${canShare ? `<p>Tryk <b>Gem på Drev</b>, vælg <b>Drev</b> og gem i mappen <b>SkovPlan Felt</b>.
+      Drev husker mappen næste gang.</p>` : `<p>Filen hentes til telefonens Overførsler. Læg den i Drev-mappen <b>SkovPlan Felt</b>.</p>`}
+    <p class="muted">På pc'en henter SkovPlan den selv med «Hent data fra app».</p>
+    <button class="primary big" id="btnShare">${canShare ? "Gem på Drev" : "Hent filen"}</button>`);
+  $("#btnShare").onclick = async () => {
+    if (canShare) {
+      try { await navigator.share({ files: [file], title: name }); }
+      catch (e) { if (e.name === "AbortError") return; toast("Deling mislykkedes: " + e.message, 5000); return; }
+    } else { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
+    const t = new Date().toISOString();
+    for (const r of state.regs) { r.exported = t; await db.put("regs", r); }
+    closeSheet(); refreshMenuInfo(); toast(`Eksporteret: ${state.regs.length} registreringer, ${rows} litra i taksationsarket`, 4000);
+  };
 }
 async function clearExported() {
   const done = state.regs.filter(r => r.exported);
@@ -714,6 +745,8 @@ function refreshMenuInfo() {
 }
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
+  welcome: () => showWelcome(true),
+  closeWelcome: () => { if (!state.ortho) safeLS("skipOrtho", "1"); $("#empty").classList.add("hidden"); },
   listAll, export: doExport, clearRegs: clearExported,
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
   newPlot: () => newReg("proeveflade"), note: () => newReg("note"), taksation: () => newReg("taksation"),
@@ -729,27 +762,54 @@ document.addEventListener("click", e => {
 $("#btnMenu").onclick = () => { refreshMenuInfo(); $("#menu").classList.toggle("hidden"); };
 $("#photoInput").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) takePhoto(f); };
 $("#gpkgInput").onchange = async e => {
-  const files = [...e.target.files]; e.target.value = ""; if (!files.length) return;
-  for (const f of files.sort((a, b) => /\.mbtiles$/i.test(a.name) - /\.mbtiles$/i.test(b.name))) {
-    try {
-      if (/\.mbtiles$/i.test(f.name)) await loadOrtho(f);
-      else await loadGpkg(f);
-    } catch (err) { console.error(err); toast("Kunne ikke læse " + f.name + ": " + err.message, 6000); }
-  }
+  const files = [...e.target.files]; e.target.value = ""; if (files.length) openFiles(files);
 };
-async function loadGpkg(f) {
-  toast("Læser " + f.name + " …", 10000);
-  const data = await readGpkg(f);
+/* Åbn hvad som helst fra SkovPlan: en feltpakke (zip med kort + ortofoto), skovdriftsplan.gpkg eller ortofoto-mbtiles.
+   Filtypen afgøres af indholdet, ikke navnet, så «skovdriftsplan (1).gpkg» fra Drev også virker. */
+async function openFiles(files) {
+  const items = [];
+  for (const f of files) {
+    try {
+      const head = new Uint8Array(await f.slice(0, 16).arrayBuffer());
+      if (head[0] === 0x50 && head[1] === 0x4b) {           // PK = zip
+        toast("Pakker " + f.name + " ud …", 60000);
+        const zip = await JSZip.loadAsync(f);
+        let meta = null;
+        const mj = zip.file(/feltpakke\.json$/i)[0];
+        if (mj) try { meta = JSON.parse(await mj.async("string")); } catch (err) { /* ok */ }
+        const inner = zip.file(/\.(gpkg|mbtiles)$/i);
+        if (!inner.length) throw new Error(zip.file(/registreringer\.geojson$/i).length
+          ? "det er en eksport fra appen. Den skal hentes ind i SkovPlan med «Hent data fra app»"
+          : "zip-filen indeholder hverken skovkort eller ortofoto");
+        for (const z of inner) items.push({ file: new File([await z.async("blob")], z.name.split("/").pop()), meta });
+      } else if (new TextDecoder().decode(head).startsWith("SQLite format 3")) items.push({ file: f });
+      else throw new Error("filen er hverken en feltpakke, et skovkort (.gpkg) eller et ortofoto (.mbtiles)");
+    } catch (err) { console.error(err); toast("Kunne ikke åbne " + f.name + ": " + err.message, 7000); }
+  }
+  // skovkortet først, så ortofotoet kan zoome til skoven
+  items.sort((a, b) => /\.mbtiles$/i.test(a.file.name) - /\.mbtiles$/i.test(b.file.name));
+  for (const { file, meta } of items) {
+    let g = null;
+    try {
+      toast("Læser " + file.name + " …", 60000);
+      g = await openSqlite(file);
+      if (hasTable(g, "tiles") && hasTable(g, "metadata")) await loadOrtho(g, file);
+      else if (hasTable(g, "gpkg_contents")) await loadGpkg(g, file, meta);
+      else throw new Error("ukendt filtype");
+    } catch (err) { console.error(err); toast("Kunne ikke læse " + file.name + ": " + err.message, 7000); }
+    finally { g?.close(); }
+  }
+  showWelcome();
+}
+async function loadGpkg(g, f, meta) {
+  const data = readGpkg(g, f);
+  if (meta) data.pakke = meta;
   await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData();
-  $("#empty").classList.add("hidden");
   toast(`Indlæst: ${data.layers.skovafdelinger.features.length} litradele`);
 }
 /* Læs ortofotoet (MBTiles fra SkovPlan) og læg fliserne i telefonens lager, så det virker uden net. */
-async function loadOrtho(f) {
-  toast("Læser ortofoto " + f.name + " …", 60000);
-  SQL = SQL || await initSqlJs({ locateFile: n => "lib/" + n });
-  const g = new SQL.Database(sqliteBytes(await f.arrayBuffer()));
-  try {
+async function loadOrtho(g, f) {
+  {
     const meta = {};
     (g.exec("SELECT name, value FROM metadata")[0]?.values || []).forEach(([k, v]) => meta[k] = v);
     const total = g.exec("SELECT count(*) FROM tiles")[0].values[0][0];
@@ -771,7 +831,15 @@ async function loadOrtho(f) {
     setBasemap(0); restyle();
     if (!state.data && state.ortho.bounds) { const b = state.ortho.bounds; map.fitBounds([[b[1], b[0]], [b[3], b[2]]]); }
     toast(`Ortofoto gemt (${total} fliser) – virker uden net`, 4000);
-  } finally { g.close(); }
+  }
+}
+/* Velkomstkortet viser, hvad der mangler: skovkort og/eller ortofoto. */
+function showWelcome(force) {
+  const hasMap = !!state.data, hasOrtho = !!state.ortho;
+  $("#stMap").className = hasMap ? "ok" : ""; $("#stMap").textContent = hasMap ? "Skovkort: " + state.data.name : "Skovkort mangler";
+  $("#stOrtho").className = hasOrtho ? "ok" : ""; $("#stOrtho").textContent = hasOrtho ? "Ortofoto gemt" : "Ortofoto mangler";
+  $("#welcomeClose").classList.toggle("hidden", !hasMap);
+  $("#empty").classList.toggle("hidden", !force && hasMap && hasOrtho || !force && hasMap && safeLS("skipOrtho") === "1");
 }
 function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelinger).getBounds(), { padding: [20, 20] }); } catch (e) { /* tom */ } }
 
@@ -784,7 +852,8 @@ function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelin
     state.regs = await db.all("regs");
   } catch (e) { console.error(e); toast("Telefonens lager kunne ikke åbnes: " + e.message, 6000); }
   const saved = safeLS("basemap"); setBasemap(saved === null ? 0 : +saved % BASEMAPS.length);
-  if (state.data) { drawData(); fitData(); } else $("#empty").classList.remove("hidden");
+  if (state.data) { drawData(); fitData(); }
+  showWelcome();
   drawRegMarkers(); startGps();
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW", e));
 })();

@@ -6,38 +6,39 @@
 <meta name="theme-color" content="#2f5d3a">
 <title>SkovPlan Felt</title>
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="lib/leaflet.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header id="top">
   <button id="btnMenu" class="icon" aria-label="Menu">☰</button>
-  <div id="title">SkovPlan Felt<small id="where"></small></div>
+  <div id="title"><img src="logo-symbol.png" alt="" class="brand">SkovPlan Felt<small id="where"></small></div>
   <button id="btnLocate" class="icon" aria-label="Find mig">◎</button>
 </header>
 
 <div id="map"></div>
 
 <div id="empty" class="overlay hidden">
-  <div class="card">
-    <h2>Velkommen</h2>
-    <p>Find ejendommens mappe i Google Drev (qgis › Projekter › …):</p>
-    <p>1. <b>skovdriftsplan.gpkg</b> i ejendomsmappen er skovkortet.<br>
-       2. <b>Ortofoto › ortofoto_feltapp.mbtiles</b> er ortofotoet.</p>
-    <p class="muted">Begge gemmes på telefonen og virker derefter uden net.</p>
-    <button class="primary big" data-act="openGpkg">1. Åbn skovkort</button>
-    <button class="big" data-act="openGpkg" style="margin-top:8px">2. Åbn ortofoto</button>
+  <div class="card welcome">
+    <img src="logo.png" alt="SkovPlan" class="logo">
+    <h2>SkovPlan Felt</h2>
+    <p>Åbn <b>feltpakken</b> fra din skovplan. Den hedder <b>Feltpakke_<i>skovens navn</i>.zip</b> og ligger i Google Drev eller er delt med dig.</p>
+    <ul class="status"><li id="stMap">Skovkort mangler</li><li id="stOrtho">Ortofoto mangler</li></ul>
+    <button class="primary big" data-act="openGpkg">Åbn feltpakke</button>
+    <p class="muted">Pakken indeholder skovkort og ortofoto. Begge gemmes på telefonen og virker derefter uden net.
+      Du kan også vælge <b>skovdriftsplan.gpkg</b> og <b>ortofoto_feltapp.mbtiles</b> hver for sig.</p>
+    <button class="big hidden" id="welcomeClose" data-act="closeWelcome">Fortsæt</button>
   </div>
 </div>
 
 <section id="sheet" class="sheet hidden"></section>
 
 <nav id="menu" class="hidden">
-  <button data-act="openGpkg">Åbn skovkort / ortofoto</button>
+  <button data-act="welcome">Åbn feltpakke / skovkort</button>
   <button data-act="listAll">Alle registreringer</button>
-  <button data-act="export">Eksportér til SkovPlan</button>
+  <button data-act="export">Eksportér til SkovPlan (Drev)</button>
   <button data-act="basemap">Skift baggrundskort</button>
   <button data-act="clearRegs" class="danger">Slet eksporterede registreringer</button>
   <p class="muted" id="menuInfo"></p>
