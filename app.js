@@ -840,7 +840,8 @@ function scheduleSync(force) {
 async function rpc(fn, body) {
   const c = syncCfg();
   const res = await fetch(`${c.rest}/rpc/${fn}`, { method: "POST",
-    headers: { "Content-Type": "application/json", apikey: c.anon, Authorization: "Bearer " + c.anon }, body: JSON.stringify(body) });
+    headers: Object.assign({ "Content-Type": "application/json", apikey: c.anon },
+      /^eyJ/.test(c.anon) ? { Authorization: "Bearer " + c.anon } : {}), body: JSON.stringify(body) });
   if (!res.ok) { let m = ""; try { m = (await res.json()).message; } catch (e) { /* ok */ } throw new Error(m || "HTTP " + res.status); }
   return res.json();
 }
