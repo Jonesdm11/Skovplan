@@ -191,16 +191,20 @@ function plotStats(p) {
   };
 }
 function standSummary(regs) {
-  const plots = regs.filter(r => r.type === "proeveflade");
+  const plots = regs.filter(r => r.type === "proeveflade" || r.type === "vinkel");
   const tax = regs.filter(r => r.type === "taksation").sort((a, b) => a.created.localeCompare(b.created)).pop();
-  const out = { plots: plots.length };
+  const out = { plots: plots.filter(p => p.type === "proeveflade").length, points: plots.filter(p => p.type === "vinkel").length };
   if (plots.length) {
-    const st = plots.map(p => plotStats(p.data));
-    const mean = k => st.reduce((s, x) => s + x[k], 0) / st.length;
+    // Vinkelpunkter uden målte træer låner de målte træer fra litraets andre vinkelpunkter (samme bevoksning).
+    const pooled = plots.filter(p => p.type === "vinkel").flatMap(p => (p.data.trees || []).filter(t => num(t.d) > 0));
+    const st = plots.map(p => p.type !== "vinkel" ? plotStats(p.data)
+      : vinkelStats((p.data.trees || []).some(t => num(t.d) > 0) ? p.data : { ...p.data, trees: pooled }));
+    // Vinkeltællinger uden målte træer giver G, men ikke stamtal: gennemsnit kun over punkter med tallet.
+    const mean = k => { const v = st.filter(x => x[k] !== null && Number.isFinite(x[k])); return v.length ? v.reduce((s, x) => s + x[k], 0) / v.length : null; };
     const sum = k => st.reduce((s, x) => s + x[k], 0);
-    out.N = mean("N"); out.G = mean("G");
+    out.N = mean("N"); out.G = mean("G"); out.spread = vinkelSpread(regs);
     out.Dg = sum("_sd2") ? sum("_sd3") / sum("_sd2") : null;
-    const manual = plots.map(p => num(p.data.hg)).filter(v => v !== null);
+    const manual = plots.filter(p => p.type === "proeveflade").map(p => num(p.data.hg)).filter(v => v !== null);
     out.Hg = sum("_sgH") ? sum("_sgh") / sum("_sgH") : manual.length ? manual.reduce((a, b) => a + b, 0) / manual.length : null;
     const bks = plots.map(p => num(p.data.bk)).filter(v => v !== null);
     if (bks.length) out.Bk = bks.reduce((a, b) => a + b, 0) / bks.length;
@@ -497,9 +501,12 @@ function selectStand(f) {
       <button data-act="photo">📷 Foto</button>
       <button data-act="note">✎ Note</button>
     </div>
+    <button class="big" data-act="vinkel">◔ Vinkeltælling (relaskop)</button>
     <button class="big" data-act="taksation">Taksér litraet direkte (Hg, Dg, stamtal …)</button>
     <button class="big" data-act="goStand">➜ Gå til ${esc(standLabel(p))}</button>
-    ${s.plots || s.Hg != null || s.Dg != null ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${[s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "",
+    ${s.spread && s.spread.n > 1 ? `<p class="muted small">Vinkeltælling: ${s.spread.n} punkter, G ${fmt(s.spread.mean, 1)} m²/ha${s.spread.se !== null ? ` ± ${fmt(s.spread.se, 0)} % (middelfejl)` : ""}${s.spread.se > 10 ? ". Tag flere punkter for et sikrere tal." : ""}</p>` : ""}
+    ${s.plots || s.points || s.Hg != null || s.Dg != null ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${[s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "",
+      s.points ? `${s.points} vinkeltælling${s.points === 1 ? "" : "er"}` : "",
       s.Hg != null ? `Hg ${fmt(s.Hg)} m` : "", s.Dg != null ? `Dg ${fmt(s.Dg)} cm` : "", s.N ? `${fmt(s.N, 0)} stk/ha` : "",
       s.G ? `G ${fmt(s.G)} m²/ha` : "", s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ")}</div>` : ""}
     <ul class="list">${regs.filter(r => !r.data.parent).map(regItem).join("")}</ul>`);
@@ -513,6 +520,7 @@ function regItem(r) {
   else if (r.type === "foto") txt = "Foto" + (r.data.note ? ": " + esc(r.data.note) : "");
   else if (r.type === "note") { const n = childPhotos(r).length; txt = (r.data.general ? "<b>Generel note</b>" + (r.data.note ? ": " : "") : "") + esc(r.data.note) + (n ? ` · 📷 ${n}` : ""); }
   else if (r.type === "taksation") txt = `Taksation: Hg ${fmt(num(r.data.hg))} · Dg ${fmt(num(r.data.dg))} · ${fmt(num(r.data.n), 0)} stk/ha`;
+  else if (r.type === "vinkel") { const s = vinkelStats(r.data); txt = `Vinkeltælling BAF ${fmt(s.baf, 0)} · ${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha` + (s.N ? ` · ${fmt(s.N, 0)} stk/ha` : ""); }
   else if (r.type === "stak" || r.type === "stok") txt = pileText(r) + (r.data.note ? ": " + esc(r.data.note) : "");
   else if (r.type === "spor") txt = `Rute ${fmtLen(r.data.length_m)} · ${Math.round(r.data.minutes || 0)} min` + (r.data.note ? ": " + esc(r.data.note) : "");
   const thumb = r.type === "foto" ? r.id : r.type === "note" ? childPhotos(r)[0]?.id : null;
@@ -636,6 +644,171 @@ function plotForm(reg) {
   if (reg._new) body.querySelector('input[data-k="d1"]').focus();
 }
 
+/* ------------------------------------------------------------------ vinkeltælling (relaskop, Bitterlich)
+   Hvert træ «ind» = BAF m²/ha; et grænsetræ tæller halvt. G = BAF × (ind + ½ × grænse).
+   Med diameter (og højde) på nogle af de talte træer: hvert prøvetræ står for (talte/målte) træer, og hvert talt træ
+   repræsenterer BAF / g træer pr. ha. Derfor N = G × gennemsnit(1/g), Dg (Σd³/Σd²) = gennemsnittet af de målte diametre
+   og Hg (grundfladevægtet) = gennemsnittet af de målte højder.
+   Kilder: «To select an appropriate BAF, estimate G and divide by 10» og «a count of 7-12 trees per sample point» (ANU Fenner
+   School, Forest mensuration: Angle count sampling); «Do not change prism BAF from plot to plot within a stand» (Marty,
+   Point Sampling, Michigan State University Extension E-1757). */
+const BAFS = [1, 2, 4];
+const fmtCnt = n => fmt(n, n % 1 ? 1 : 0);
+const BAF_SOURCES = [["ANU Fenner School: Angle count sampling", "https://fennerschool-associated.anu.edu.au/mensuration/acs.htm"],
+  ["Marty: Point Sampling, MSU Extension E-1757", "https://msaf.forest.mtu.edu/ForestInfo/MSUElibrary/E1757_PointSampling.PDF"]];
+const bafFor = G => BAFS.reduce((best, b) => Math.abs(Math.log(G / b / 10)) < Math.abs(Math.log(G / best / 10)) ? b : best, 2);
+const reachM = (dcm, baf) => dcm / 100 / (2 * Math.sqrt(baf / 10000));   // grænseafstand: et træ med diameter d tæller ud til d/(2·√(BAF/10000))
+function vinkelStats(d) {
+  const baf = num(d.baf) || 2, rows = d.counts || [];
+  const cnt = rows.reduce((s, r) => s + (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0), 0), G = baf * cnt;
+  const byArt = rows.map(r => ({ art: r.art, n: (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0) })).filter(r => r.n).map(r => ({ ...r, G: baf * r.n }));
+  const samp = (d.trees || []).filter(t => num(t.d) > 0);
+  const out = { baf, cnt, n: cnt, G, byArt, sampled: samp.length, N: null, Dg: null, Hg: null, heights: 0, _sd2: 0, _sd3: 0, _sgh: 0, _sgH: 0 };
+  if (samp.length && cnt) {
+    const w = cnt / samp.length;                      // talte træer pr. målt træ
+    for (const t of samp) {
+      const dd = num(t.d), g = Math.PI / 4 * (dd / 100) ** 2, Ni = w * baf / g, h = num(t.h);
+      out._sd2 += Ni * dd * dd; out._sd3 += Ni * dd ** 3; out.N += Ni;
+      if (h) { out._sgh += Ni * g * h; out._sgH += Ni * g; out.heights++; }
+    }
+    out.Dg = out._sd3 / out._sd2; out.Hg = out._sgH ? out._sgh / out._sgH : null;
+  }
+  return out;
+}
+/* Spredning mellem punkterne i et litra: gennemsnit, standardafvigelse og middelfejl i %. */
+function vinkelSpread(regs) {
+  const gs = regs.filter(r => r.type === "vinkel").map(r => vinkelStats(r.data).G);
+  if (!gs.length) return null;
+  const m = gs.reduce((a, b) => a + b, 0) / gs.length;
+  const sd = gs.length > 1 ? Math.sqrt(gs.reduce((a, g) => a + (g - m) ** 2, 0) / (gs.length - 1)) : null;
+  return { n: gs.length, mean: m, sd, se: sd !== null && m ? sd / Math.sqrt(gs.length) / m * 100 : null };
+}
+/* Hvilken BAF og hvorfor: låst af litraets andre punkter > foreslået fra litraets G > spørg om skovtypen. */
+function bafAdvice(reg) {
+  const others = reg.stand ? state.regs.filter(r => r.type === "vinkel" && r.id !== reg.id && r.stand?.key === reg.stand.key) : [];
+  if (others.length) { const b = num(others[0].data.baf) || 2;
+    return { baf: b, locked: true, why: `Samme BAF som litraets ${others.length === 1 ? "første punkt" : others.length + " andre punkter"}, så punkterne kan lægges sammen.` }; }
+  const f = reg.stand && state.data?.layers.skovafdelinger.features.find(x => standKey(x.properties) === reg.stand.key);
+  const G = num(f?.properties.grundflade_m2_ha);
+  if (G) { const b = bafFor(G); return { baf: b, why: `Litraet har G ≈ ${fmt(G, 0)} m²/ha i planen, så du tæller ca. ${Math.round(G / b)} træer pr. punkt med BAF ${b}.` }; }
+  return { baf: null, why: "" };
+}
+const SKOVTYPER = [["Åben skov, få og store træer", "G under ca. 15 m²/ha", 1], ["Almindelig skov", "G ca. 15–30 m²/ha", 2], ["Tæt skov, fx tæt nåleskov", "G over ca. 30 m²/ha", 4]];
+function vinkelForm(reg) {
+  const d = reg.data, adv = bafAdvice(reg), defArt = reg.stand?.art || "";
+  if (!d.baf) d.baf = adv.baf;
+  d.counts = d.counts?.length ? d.counts : [{ art: defArt || "Blandet", ind: 0, gr: 0 }];
+  d.trees = d.trees || [];
+  const hist = [];
+  const arts = ["Blandet", ...speciesOptions(defArt)];
+  openSheet(`
+    <div class="head"><h3>Vinkeltælling · ${esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
+    <div id="vBaf"></div>
+    <div id="vBody"></div>`, true);
+  const drawBaf = () => {
+    if (!d.baf) {
+      $("#vBaf").innerHTML = `<div class="bafask"><b>Hvor tæt er skoven, hvor du står?</b>
+        <p class="muted small">Litraet har ingen grundflade i planen, så appen kan ikke selv vælge tællefaktor (BAF).</p>
+        ${SKOVTYPER.map(([t, g, b]) => `<button class="big" data-baf="${b}"><b>${t}</b><br><span class="muted small">${g} → BAF ${b}</span></button>`).join("")}</div>`;
+      $("#vBody").innerHTML = ""; return;
+    }
+    const why = d.baf === adv.baf ? adv.why : adv.locked ? `Bemærk: litraets andre punkter er talt med BAF ${adv.baf}. Punkter med forskellig BAF kan ikke sammenlignes direkte.` : (d.bafWhy || "");
+    $("#vBaf").innerHTML = `<div class="bafbox">
+        <div class="bafbig"><span>BAF</span><b>${fmt(d.baf, 0)}</b></div>
+        <div class="grow"><b>Stil relaskopet på tællefaktor ${fmt(d.baf, 0)}.</b> Hvert træ ind = ${fmt(d.baf, 0)} m²/ha.
+          <br><span class="muted small">${esc(why)} Et træ på 30 cm tæller med ud til ${fmt(reachM(30, d.baf), 1)} m.</span>
+          <br><button id="vChange" class="linklike">${adv.locked ? "Skift BAF (ikke anbefalet)" : "Skift BAF"}</button></div></div>
+      <details class="help"><summary>Hvordan vælger jeg BAF?</summary>
+        <p><b>Kilde:</b> Vælg den faktor, der svarer til G ÷ 10, så du tæller omkring 10 træer pr. punkt. 7–12 træer pr. punkt er et godt kompromis.
+          Brug samme faktor i hele bevoksningen. Et grænsetræ tæller halvt.</p>
+        <p><b>Appens anbefaling (ikke fra kilden):</b> Appen vælger mellem 1, 2 og 4 ud fra litraets G i planen. Den advarer, hvis du tæller under 5 eller over 20 træer.
+          Uden G i planen kan du bruge skovtypen som tommelfingerregel.</p>
+        <p class="muted small">Kilder: ${BAF_SOURCES.map(([n, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(n)}</a>`).join(" · ")}</p></details>`;
+    $("#vChange").onclick = () => {
+      if (adv.locked && !confirm(`Litraets andre punkter er talt med BAF ${adv.baf}. Skifter du, kan punkterne ikke lægges direkte sammen. Skift alligevel?`)) return;
+      const b = prompt("Tællefaktor (BAF) – 1, 2 eller 4:", String(d.baf)); const v = num(b);
+      if (v && v > 0) { d.baf = v; d.bafWhy = "Valgt af dig."; drawBaf(); }
+    };
+    if (!$("#vBody").innerHTML) drawBody(); else result();
+  };
+  $("#vBaf").onclick = e => { const b = e.target.closest("[data-baf]"); if (!b) return; d.baf = +b.dataset.baf;
+    d.bafWhy = `Valgt ud fra skovtypen (${SKOVTYPER.find(x => x[2] === d.baf)[0].toLowerCase()}).`; drawBaf(); };
+  const drawBody = () => {
+    $("#vBody").innerHTML = `
+      <h4>Tæl træerne rundt om dig</h4>
+      <p class="muted small">Drej en hel omgang. Er stammen bredere end sigtet, er træet <b>ind</b>. Er den lige så bred, er det et <b>grænsetræ</b> (tæller halvt).</p>
+      <div id="vRows"></div>
+      <div class="actions"><select id="vArt">${arts.map(a => `<option>${esc(a)}</option>`).join("")}</select><button id="vAddArt" type="button">+ Træart</button><button id="vUndo" type="button">↶ Fortryd</button></div>
+      <div class="result" id="vRes"></div>
+      <h4>Mål 2–3 af de talte træer (valgfrit)</h4>
+      <p class="muted small">Så regner appen også stamtal, Dg og Hg ud. Tag dem jævnt rundt, ikke kun de tykkeste.</p>
+      <table class="stokke"><thead><tr><th>#</th><th>Træart</th><th>Diam. cm</th><th>Højde m</th><th></th></tr></thead><tbody id="vTrees"></tbody></table>
+      <button id="vAddTree" type="button">+ Målt træ</button>
+      <label>Note til punktet</label><textarea id="vNote">${esc(d.note || "")}</textarea>
+      <div class="stack"><button class="primary big" id="vSave">Gem vinkeltælling</button>
+        ${reg._new ? "" : '<button class="danger" id="vDel">Slet</button>'}${!reg._new && reg.lat ? '<button id="goReg">➜ Gå hertil</button>' : ""}</div>`;
+    drawRows(); drawTrees(); wire();
+  };
+  const drawRows = () => {
+    $("#vRows").innerHTML = d.counts.map((r, i) => `<div class="vrow"><div class="vart">${esc(r.art)}</div>
+      <button class="vin" data-in="${i}">Ind<b>${fmt(num(r.ind) || 0, 0)}</b></button>
+      <button class="vgr" data-gr="${i}">Grænse<b>${fmt(num(r.gr) || 0, 0)}</b></button></div>`).join("");
+    result();
+  };
+  const result = () => {
+    if (!$("#vRes")) return;
+    const s = vinkelStats(d);
+    let warn = "";
+    if (s.cnt > 20) { const b = BAFS.find(x => x > s.baf); warn = `Du har talt ${fmtCnt(s.cnt)} træer. ${b ? `Brug BAF ${b} på næste punkt, så går det hurtigere.` : ""}`; }
+    else if (s.cnt > 0 && s.cnt < 5 && d.done) { const b = [...BAFS].reverse().find(x => x < s.baf); warn = `Kun ${fmtCnt(s.cnt)} træer. ${b ? `BAF ${b} giver et sikrere tal.` : ""}`; }
+    $("#vRes").innerHTML = `<b>${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha</b>` +
+      (s.byArt.length > 1 ? "<br>" + s.byArt.map(a => `${esc(a.art)}: G ${fmt(a.G, 1)}`).join(" · ") : "") +
+      (s.N ? `<br>${fmt(s.N, 0)} stk/ha · Dg ${fmt(s.Dg, 1)} cm${s.Hg ? ` · Hg ${fmt(s.Hg, 1)} m` : ""} <span class="muted">(ud fra ${s.sampled} målte træer)</span>` : "") +
+      (warn ? `<div class="warn">${esc(warn)}</div>` : "");
+  };
+  const drawTrees = () => {
+    $("#vTrees").innerHTML = d.trees.map((t, i) => `<tr><td>${i + 1}</td>
+      <td><select data-i="${i}" data-k="art">${arts.map(a => `<option${a === t.art ? " selected" : ""}>${esc(a)}</option>`).join("")}</select></td>
+      <td><input data-i="${i}" data-k="d" inputmode="decimal" value="${esc(t.d ?? "")}"></td>
+      <td><input data-i="${i}" data-k="h" inputmode="decimal" value="${esc(t.h ?? "")}"></td>
+      <td><button type="button" data-rm="${i}" aria-label="Fjern">×</button></td></tr>`).join("");
+  };
+  const wire = () => {
+    $("#vRows").onclick = e => {
+      const b = e.target.closest("[data-in],[data-gr]"); if (!b) return;
+      const i = +(b.dataset.in ?? b.dataset.gr), k = b.dataset.in !== undefined ? "ind" : "gr";
+      d.counts[i][k] = (num(d.counts[i][k]) || 0) + 1; hist.push([i, k]);
+      if (navigator.vibrate) navigator.vibrate(25);
+      drawRows();
+    };
+    $("#vUndo").onclick = () => { const h = hist.pop(); if (!h) return toast("Intet at fortryde"); d.counts[h[0]][h[1]] = Math.max(0, (num(d.counts[h[0]][h[1]]) || 0) - 1); drawRows(); };
+    $("#vAddArt").onclick = () => { const a = $("#vArt").value; if (d.counts.some(r => r.art === a)) return toast(a + " er allerede med");
+      if (d.counts.length === 1 && d.counts[0].art === "Blandet" && !num(d.counts[0].ind) && !num(d.counts[0].gr)) d.counts = [];
+      d.counts.push({ art: a, ind: 0, gr: 0 }); drawRows(); };
+    $("#vTrees").oninput = $("#vTrees").onchange = e => { const x = e.target; if (x.dataset.k) { d.trees[+x.dataset.i][x.dataset.k] = x.value.trim(); result(); } };
+    $("#vTrees").onclick = e => { const b = e.target.closest("[data-rm]"); if (!b) return; d.trees.splice(+b.dataset.rm, 1); drawTrees(); result(); };
+    $("#vAddTree").onclick = () => { d.trees.push({ art: d.counts[0]?.art || defArt, d: "", h: "" }); drawTrees();
+      $(`#vTrees input[data-i="${d.trees.length - 1}"][data-k="d"]`).focus(); };
+    $("#vSave").onclick = async () => {
+      const s = vinkelStats(d);
+      if (!s.cnt) return toast("Tryk «Ind» for hvert træ, der tæller med");
+      d.done = true;
+      if (s.cnt < 5 && !confirm(`Du har kun talt ${fmtCnt(s.cnt)} træer. ${s.baf > 1 ? "En lavere BAF giver et sikrere tal. " : ""}Gem alligevel?`)) { result(); return; }
+      d.counts = d.counts.filter(r => num(r.ind) || num(r.gr));
+      d.trees = d.trees.filter(t => num(t.d)).map(t => ({ art: t.art, d: num(t.d), h: num(t.h) }));
+      d.note = $("#vNote").value.trim(); delete d.done;
+      if (!reg.lat && state.me) Object.assign(reg, pos());
+      await saveReg(reg);
+      const sp = vinkelSpread(state.regs.filter(r => r.stand?.key === reg.stand?.key));
+      toast(`Gemt: G ${fmt(s.G, 1)} m²/ha` + (sp && sp.n > 1 ? ` · litraet: ${sp.n} punkter, G ${fmt(sp.mean, 1)}${sp.se !== null ? ` ± ${fmt(sp.se, 0)} %` : ""}` : ""), 5000);
+      backToStand(reg);
+    };
+    if ($("#vDel")) $("#vDel").onclick = () => deleteReg(reg);
+    if ($("#goReg")) $("#goReg").onclick = () => { closeSheet(); goTo(reg.lat, reg.lon, "Vinkeltælling " + (reg.stand?.label || "")); };
+  };
+  drawBaf();
+}
+
 /* -------- direkte taksation */
 function taxForm(reg) {
   const d = reg.data, f = (id, lbl, v, mode = "decimal") => `<div><label>${lbl}</label><input id="${id}" inputmode="${mode}" value="${esc(v ?? "")}"></div>`;
@@ -742,6 +915,7 @@ function newReg(type, general = false) {
   const stand = general ? null : currentStand();
   const base = { id: uid(), _new: true, type, created: new Date().toISOString(), ...pos(), stand };
   if (type === "proeveflade") return plotForm({ ...base, data: { radius: 10, trees: [], hg: null, bk: null, note: "" } });
+  if (type === "vinkel") return vinkelForm({ ...base, data: { counts: [], trees: [], note: "" } });
   if (type === "taksation") return stand ? taxForm({ ...base, data: {} }) : toast("Vælg et litra først");
   if (type === "note") return noteForm({ ...base, data: general ? { note: "", general: true } : { note: "" } });
 }
@@ -773,20 +947,21 @@ function drawRegMarkers() {
   regLayer = L.layerGroup(state.regs.filter(r => r.lat).map(r => r.type === "spor"
     ? L.polyline(r.data.points.map(p => [p[0], p[1]]), { color: "#e8710a", weight: 3, opacity: 0.8, dashArray: "1 6", lineCap: "round" }).on("click", () => editReg(r.id))
     : L.circleMarker([r.lat, r.lon], {
-    radius: r.type === "proeveflade" ? 7 : 5, color: "#fff", weight: 2, fillOpacity: 1,
-    fillColor: { proeveflade: "#7a1fa2", foto: "#e8710a", note: "#1a73e8", taksation: "#0b8043", stak: "#8d5524", stok: "#5d4037" }[r.type],
+    radius: r.type === "proeveflade" || r.type === "vinkel" ? 7 : 5, color: "#fff", weight: 2, fillOpacity: 1,
+    fillColor: { proeveflade: "#7a1fa2", foto: "#e8710a", note: "#1a73e8", taksation: "#0b8043", vinkel: "#c2185b", stak: "#8d5524", stok: "#5d4037" }[r.type],
   }).on("click", () => editReg(r.id)))).addTo(map);
 }
 function editReg(id) {
   const r = state.regs.find(x => x.id === id); if (!r) return;
   const copy = { ...r, data: JSON.parse(JSON.stringify(r.data)) };
-  ({ proeveflade: plotForm, taksation: taxForm, foto: noteForm, note: noteForm, spor: trackForm, stak: stakForm, stok: stokForm })[r.type](copy);
+  ({ proeveflade: plotForm, vinkel: vinkelForm, taksation: taxForm, foto: noteForm, note: noteForm, spor: trackForm, stak: stakForm, stok: stokForm })[r.type](copy);
 }
 function listAll() {
   state.selected = null; restyle();
   const regs = state.regs.filter(r => !r.data.parent).sort((a, b) => b.created.localeCompare(a.created));
   openSheet(`<div class="head"><h3>Alle registreringer (${regs.length})</h3><button class="close">Luk</button></div>
     <div class="actions"><button class="primary" data-act="newPlot">+ Prøveflade</button><button data-act="photo">📷 Foto</button><button data-act="note">✎ Note</button></div>
+    <button class="big" data-act="vinkel">◔ Vinkeltælling (relaskop)</button>
     <button class="big" data-act="generalNote">✎ Generel note (ikke knyttet til et litra)</button>
     <button class="big" data-act="pileList">Stakke og stokke (opmåling)</button>
     ${regs.length ? `<ul class="list">${regs.map(regItem).join("")}</ul>` : '<p class="muted">Ingen registreringer endnu. Tryk på et litra på kortet for at begynde.</p>'}
@@ -1016,6 +1191,8 @@ function buildGeoJSON() {
         note: r.data.note || null, note_id: r.data.parent || null, generel: r.data.general ? 1 : null };
       if (r.type === "proeveflade") { const s = plotStats(r.data); Object.assign(props, { radius_m: r.data.radius, antal_traeer: s.n, stamtal_ha: Math.round(s.N),
         grundflade_m2_ha: +s.G.toFixed(2), dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
+      if (r.type === "vinkel") { const s = vinkelStats(r.data); Object.assign(props, { baf: s.baf, antal_traeer: s.cnt, grundflade_m2_ha: +s.G.toFixed(2),
+        stamtal_ha: s.N ? Math.round(s.N) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), traeer_json: JSON.stringify({ counts: r.data.counts, trees: r.data.trees }) }); }
       if (r.type === "taksation") Object.assign(props, { hg_m: r.data.hg, dg_cm: r.data.dg, stamtal_ha: r.data.n, grundflade_m2_ha: r.data.g, vedmasse_m3_ha: r.data.v, bk_pct: r.data.bk, ny_traeart: r.data.art || null });
       if (r.type === "foto") props.foto = photoName(r);
       if (r.type === "stak" || r.type === "stok") {
@@ -1161,7 +1338,7 @@ const ACTIONS = {
   closeWelcome: () => { if (!state.ortho) safeLS("skipOrtho", "1"); $("#empty").classList.add("hidden"); },
   listAll, export: doExport, clearRegs: clearExported,
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
-  newPlot: () => newReg("proeveflade"), note: () => newReg("note"), taksation: () => newReg("taksation"),
+  newPlot: () => newReg("proeveflade"), vinkel: () => newReg("vinkel"), note: () => newReg("note"), taksation: () => newReg("taksation"),
   generalNote: () => newReg("note", true),
   goStand: () => { const f = state.selected; if (!f) return; const c = standTarget(f); closeSheet(); goTo(c.lat, c.lng, "Litra " + standLabel(f.properties)); },
   track: toggleTrack,

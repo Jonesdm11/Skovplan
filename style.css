@@ -144,3 +144,21 @@ table.stokke button { padding: 6px 10px; }
 .search { display: flex; gap: 8px; margin: 10px 0 4px; }
 .search input { flex: 1; }
 input[readonly] { background: #f1f4f1; color: #1f3d2a; font-weight: 600; }
+/* vinkeltælling */
+.bafbox { display: flex; gap: 12px; align-items: flex-start; background: #eef5ef; border: 1px solid #c8dccb; border-radius: 12px; padding: 10px 12px; margin: 6px 0; }
+.bafbig { min-width: 64px; text-align: center; background: #1f5f3a; color: #fff; border-radius: 10px; padding: 6px 4px; line-height: 1; }
+.bafbig span { display: block; font-size: 12px; letter-spacing: .08em; opacity: .85; }
+.bafbig b { display: block; font-size: 40px; margin-top: 2px; }
+.bafbox .grow { flex: 1; line-height: 1.35; }
+.linklike { background: none; border: 0; padding: 4px 0; color: #1a5fb4; text-decoration: underline; font-size: 14px; }
+.bafask .big { text-align: left; margin: 6px 0; width: 100%; }
+details.help { margin: 4px 0 8px; font-size: 14px; }
+details.help summary { color: #1a5fb4; cursor: pointer; padding: 4px 0; }
+details.help p { margin: 6px 0; }
+.vrow { display: flex; gap: 8px; align-items: stretch; margin: 6px 0; }
+.vrow .vart { flex: 1; align-self: center; font-weight: 600; }
+.vrow button { flex: 0 0 34%; padding: 10px 6px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+.vrow button b { font-size: 24px; }
+.vrow .vin { background: #1f5f3a; color: #fff; border-color: #1f5f3a; }
+.vrow .vgr { background: #fff7e0; border-color: #e0c060; }
+.warn { margin-top: 6px; color: #8a5300; background: #fff4d6; border-radius: 8px; padding: 6px 8px; font-weight: 500; }
