@@ -16,7 +16,8 @@ En lille webapp, der installeres fra browseren ("Føj til startskærm") og virke
   Deles via telefonens del-menu (Drev, mail …).
 
 ## Begrænsninger i prototypen
-- Baggrundskortet er OpenStreetMap og gemmes kun for de fliser, man har set med net. Ortofoto fra Dataforsyningen kræver en gratis token (næste skridt).
+- Ortofoto: SkovPlans gemte ortofoto laves om til `Ortofoto/ortofoto_feltapp.mbtiles` i ejendomsmappen (JPEG-fliser, zoom 12–18). Åbn den i appen, så gemmes den på telefonen.
+- Litrafarver: samme farver som SkovPlan-projektet (træart → farve), arter uden fast farve får SkovPlans automatiske farve.
 - Vedmasse beregnes ikke af prøvefladerne (feltet efterlades tomt = SkovPlan beholder sit tal).
 - Fotos og noter kommer ikke automatisk ind i SkovPlans gpkg endnu; de ligger i geojson + fotos-mappen.
 

@@ -41,8 +41,13 @@ const db = {
   open() {
     if (this._db) return Promise.resolve(this._db);
     return new Promise((res, rej) => {
-      const r = indexedDB.open("skovplan-felt", 1);
-      r.onupgradeneeded = () => { r.result.createObjectStore("kv"); r.result.createObjectStore("regs", { keyPath: "id" }); };
+      const r = indexedDB.open("skovplan-felt", 2);
+      r.onupgradeneeded = () => {
+        const d = r.result, have = n => d.objectStoreNames.contains(n);
+        if (!have("kv")) d.createObjectStore("kv");
+        if (!have("regs")) d.createObjectStore("regs", { keyPath: "id" });
+        if (!have("tiles")) d.createObjectStore("tiles");
+      };
       r.onsuccess = () => res(this._db = r.result);
       r.onerror = () => rej(r.error);
     });
@@ -60,6 +65,8 @@ const db = {
   put(store, val, key) { return this.tx(store, "readwrite", s => { key === undefined ? s.put(val) : s.put(val, key); }); },
   del(store, key) { return this.tx(store, "readwrite", s => { s.delete(key); }); },
   all(store) { return this.tx(store, "readonly", s => this.req(s.getAll())); },
+  clear(store) { return this.tx(store, "readwrite", s => { s.clear(); }); },
+  putMany(store, entries) { return this.tx(store, "readwrite", s => { for (const [k, v] of entries) s.put(v, k); }); },
 };
 
 /* ------------------------------------------------------------------ UTM 32N (ETRS89) -> WGS84 */
@@ -109,10 +116,15 @@ function gpkgToGeoJSON(blob, transform) {
 }
 
 let SQL = null;
+/* QGIS gemmer GeoPackages i WAL-tilstand, som sql.js ikke kan åbne. Vi læser kun, så filen sættes til almindelig journal. */
+function sqliteBytes(buf) {
+  const b = new Uint8Array(buf);
+  if (b.length > 100 && b[18] === 2 && b[19] === 2) { b[18] = 1; b[19] = 1; }
+  return b;
+}
 async function readGpkg(file) {
   SQL = SQL || await initSqlJs({ locateFile: f => "lib/" + f });
-  const data = new Uint8Array(await file.arrayBuffer());
-  const g = new SQL.Database(data);
+  const g = new SQL.Database(sqliteBytes(await file.arrayBuffer()));
   try {
     const contents = {};
     const r = g.exec("SELECT table_name, srs_id FROM gpkg_contents WHERE data_type='features'");
@@ -186,27 +198,78 @@ function standSummary(regs) {
 
 /* ------------------------------------------------------------------ state + kort */
 const state = { data: null, regs: [], selected: null, me: null, standLayer: null, overlays: [], basemap: 0 };
-const map = L.map("map", { zoomControl: false, attributionControl: true }).setView([56.0, 9.5], 7);
+const map = L.map("map", { zoomControl: false, attributionControl: true, maxZoom: 21 }).setView([56.0, 9.5], 7);
 L.control.zoom({ position: "bottomright" }).addTo(map);
+/* Ortofoto fra SkovPlan (MBTiles, gemt i telefonens IndexedDB) */
+const OrthoLayer = L.GridLayer.extend({
+  createTile(c, done) {
+    const img = document.createElement("img"); img.alt = "";
+    db.get("tiles", `${c.z}/${c.x}/${c.y}`).then(b => {
+      if (b) { img.onload = () => { URL.revokeObjectURL(img.src); done(null, img); }; img.src = URL.createObjectURL(b); }
+      else done(null, img);
+    }).catch(e => done(e, img));
+    return img;
+  },
+});
 const BASEMAPS = [
-  { name: "OpenStreetMap", layer: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, maxNativeZoom: 19, attribution: "© OpenStreetMap" }) },
+  { name: "Ortofoto (gemt)", layer: null, ortho: true },
+  { name: "OpenStreetMap", layer: L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 20, maxNativeZoom: 19, attribution: "© OpenStreetMap" }) },
   { name: "Ingen baggrund", layer: null },
 ];
+function makeOrtho() {
+  const m = state.ortho; if (!m) return null;
+  return new OrthoLayer({ minZoom: 0, maxZoom: 21, minNativeZoom: m.minzoom, maxNativeZoom: m.maxzoom, attribution: m.attribution || "Ortofoto",
+    bounds: m.bounds ? L.latLngBounds([m.bounds[1], m.bounds[0]], [m.bounds[3], m.bounds[2]]) : undefined });
+}
 function setBasemap(i) {
   BASEMAPS.forEach(b => b.layer && map.removeLayer(b.layer));
+  if (BASEMAPS[i].ortho && !state.ortho) i = 1;
+  if (BASEMAPS[0].layer && BASEMAPS[0].layer._skovMeta !== state.ortho) BASEMAPS[0].layer = null;
+  if (BASEMAPS[i].ortho && !BASEMAPS[0].layer) { BASEMAPS[0].layer = makeOrtho(); BASEMAPS[0].layer._skovMeta = state.ortho; }
   state.basemap = i; const b = BASEMAPS[i]; if (b.layer) b.layer.addTo(map).bringToBack();
   try { localStorage.setItem("basemap", i); } catch (e) { /* ok */ }
 }
-setBasemap(+(safeLS("basemap") || 0) % BASEMAPS.length);
 function safeLS(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 
-const SPECIES_COLORS = [
-  [/rødgran|omorika|sitka|ædelgran|nobilis|grandis|douglas|tsuga|nåle|gran/i, "#3d7a46"],
-  [/fyr|contorta/i, "#6f8f3a"], [/lærk/i, "#9bbf4d"],
-  [/bøg/i, "#d9a441"], [/eg$|^eg|eg\b/i, "#b9772c"], [/løv|ask|ahorn|birk|el$|elm|lind|poppel/i, "#e3c25b"],
-  [/sø|å$|vand/i, "#6aa9d8"], [/eng|mose|hede|succession|udyrket/i, "#c8d6a0"],
-];
-const colorFor = art => (SPECIES_COLORS.find(([re]) => re.test(art || "")) || [null, "#b8b8b8"])[1];
+/* SkovPlans litrafarver (træart -> fyldfarve), som de står i SkovPlan-projektet. */
+const SPECIES_COLORS = {
+  "Agerjord": "#e0eeec", "Almindelig ædelgran": "#6a3d9a", "Anden anvendelse": "#f4f3bf", "andet": "#f4f3bf",
+  "Bjergfyr": "#e59a59", "Blandet løvskov": "#f6f57f", "Blandet løv": "#f6f57f", "Blandet nåleskov": "#bda662",
+  "Blandet nål": "#bda662", "Bøg": "#c3f88d", "Contortafyr": "#f2c29b", "Douglasgran": "#e0b030", "Eg": "#f8a9a8",
+  "Eng": "#daf3bf", "Lysåbent": "#d8c76a", "Lysåben": "#d8c76a", "Grandis": "#5e35b1", "Hus": "#9b6a58",
+  "Ikke fastlagt": "#e1e1e1", "Ikke bestemt": "#e1e1e1", "Lærk": "#8bc34a", "Mose": "#6b9c86",
+  "Naturlig succession": "#e99758", "Naturforyngelse": "#e99758", "Nobilis": "#b39ddb", "Ædelgran": "#8e6bbf",
+  "Rødgran": "#7f8c8d", "Serbisk gran": "#2e5f8a", "Omorika": "#3b74a8", "Sitkagran": "#4a90a4", "Skovbryn": "#4272cc",
+  "Skovfyr": "#c8742b", "Udyrket areal": "#d82e83", "Udyrket": "#d82e83", "Sø": "#6e99f1", "Søer": "#6e99f1",
+  "Vand": "#6e99f1", "Vej": "#ffffff", "Blandet løv og nål": "#8fa8d9", "Rødel": "#2f8f6b", "Poppel": "#e8b4d4",
+  "Birk": "#f4f0a0", "Vestamerikansk hemlock": "#00897b", "Hemlock": "#30d10c", "Ask": "#ddb4f5", "Ær": "#f7d26c",
+  "Løn": "#f7d26c", "Ær, Løn": "#f7d26c", "Andet løvtræ": "#f6f57f", "Andet nåletræ": "#9e9d24", "Vandløb": "#4276b4",
+  "Slette, Overdrev": "#daf3bf", "Ahorn": "#e69f76", "Avnbøg": "#d2ad48", "Bygning/bebygget areal": "#c78f5b",
+  "Cypres": "#455a64", "Europæisk lærk": "#c5e1a5", "Fuglekirsebær": "#50c4ca", "Gran": "#9fb4c7",
+  "Græsareal": "#77c574", "Hede": "#cd5aa5", "Hybridasp": "#5bdbe7", "Hybridlærk": "#aed581", "Japansk lærk": "#689f38",
+  "Krat": "#7345d5", "Liggeplads": "#caa147", "Læhegn": "#cfc558", "Mark": "#8072cf", "Naturareal": "#4ad56f",
+  "OP42": "#63c9c2", "Overdrev": "#4ecac2", "Park/have": "#576fc6", "Rødeg": "#c66679", "Stilkeg": "#70c6d1",
+  "Tsuga": "#4db6ac", "Vildtager": "#e0665b", "Vortebirk": "#8de471", "Vådområde": "#c6455b", "Å": "#bca84d",
+};
+const NO_SPECIES_COLOR = "#afafa5";
+const normName = s => String(s ?? "").split(/\s+/).filter(Boolean).join(" ").toLocaleLowerCase("da");
+const COLOR_LOOKUP = Object.fromEntries(Object.entries(SPECIES_COLORS).map(([k, v]) => [normName(k), v]));
+const autoColors = {};
+/* Samme automatiske farve som SkovPlan giver arter uden fast farve (sha256 -> HSV). */
+async function prepareAutoColors(names) {
+  for (const name of names) {
+    const key = normName(name);
+    if (!key || COLOR_LOOKUP[key] || autoColors[key] || !crypto?.subtle) continue;
+    const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
+    autoColors[key] = hsvHex(((d[0] << 8) | d[1]) % 360, 105 + (d[2] % 75), 185 + (d[3] % 55));
+  }
+}
+function hsvHex(h, s, v) {
+  s /= 255; v /= 255; const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return "#" + [r, g, b].map(t => Math.round((t + m) * 255).toString(16).padStart(2, "0")).join("");
+}
+const colorFor = art => { const k = normName(art); return k ? (COLOR_LOOKUP[k] || autoColors[k] || NO_SPECIES_COLOR) : NO_SPECIES_COLOR; };
 
 function drawData() {
   state.overlays.forEach(l => map.removeLayer(l)); state.overlays = [];
@@ -228,13 +291,14 @@ function drawData() {
   }).addTo(map);
   state.overlays.push(state.standLayer);
   updateLabels();
+  prepareAutoColors(new Set(L_.skovafdelinger.features.map(f => f.properties["træart"]))).then(restyle);
   $("#where").textContent = state.data.name || "";
 }
 function standStyle(f, counts) {
   const sel = state.selected && standKey(state.selected.properties) === standKey(f.properties);
   const has = counts[standKey(f.properties)];
-  return { color: sel ? "#0b57d0" : has ? "#7a1fa2" : "#24402a", weight: sel ? 4 : has ? 2.5 : 1,
-    fillColor: colorFor(f.properties["træart"]), fillOpacity: state.basemap === 1 ? 0.65 : 0.35 };
+  return { color: sel ? "#0b57d0" : has ? "#7a1fa2" : "#232323", weight: sel ? 4 : has ? 2.5 : 1,
+    fillColor: colorFor(f.properties["træart"]), fillOpacity: state.basemap === 2 ? 0.85 : 0.66 };
 }
 function restyle() { if (!state.standLayer) return; const c = countByStand(); state.standLayer.eachLayer(l => l.setStyle(standStyle(l.feature, c))); }
 function updateLabels() {
@@ -570,7 +634,7 @@ async function clearExported() {
 /* ------------------------------------------------------------------ handlinger */
 function refreshMenuInfo() {
   const n = state.regs.length, ne = state.regs.filter(r => !r.exported).length;
-  $("#menuInfo").textContent = `${state.data ? (state.data.name + " · indlæst " + new Date(state.data.loaded).toLocaleDateString("da-DK")) : "Intet skovkort"} · ${n} registreringer${ne ? `, ${ne} ikke eksporteret` : ""}`;
+  $("#menuInfo").textContent = `${state.data ? (state.data.name + " · indlæst " + new Date(state.data.loaded).toLocaleDateString("da-DK")) : "Intet skovkort"} · ${state.ortho ? "ortofoto gemt" : "intet ortofoto"} · ${n} registreringer${ne ? `, ${ne} ikke eksporteret` : ""}`;
 }
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
@@ -589,15 +653,50 @@ document.addEventListener("click", e => {
 $("#btnMenu").onclick = () => { refreshMenuInfo(); $("#menu").classList.toggle("hidden"); };
 $("#photoInput").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) takePhoto(f); };
 $("#gpkgInput").onchange = async e => {
-  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
-  toast("Læser " + f.name + " …", 10000);
-  try {
-    const data = await readGpkg(f);
-    await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData();
-    $("#empty").classList.add("hidden");
-    toast(`Indlæst: ${data.layers.skovafdelinger.features.length} litradele`);
-  } catch (err) { console.error(err); toast("Kunne ikke læse filen: " + err.message, 6000); }
+  const files = [...e.target.files]; e.target.value = ""; if (!files.length) return;
+  for (const f of files.sort((a, b) => /\.mbtiles$/i.test(a.name) - /\.mbtiles$/i.test(b.name))) {
+    try {
+      if (/\.mbtiles$/i.test(f.name)) await loadOrtho(f);
+      else await loadGpkg(f);
+    } catch (err) { console.error(err); toast("Kunne ikke læse " + f.name + ": " + err.message, 6000); }
+  }
 };
+async function loadGpkg(f) {
+  toast("Læser " + f.name + " …", 10000);
+  const data = await readGpkg(f);
+  await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData();
+  $("#empty").classList.add("hidden");
+  toast(`Indlæst: ${data.layers.skovafdelinger.features.length} litradele`);
+}
+/* Læs ortofotoet (MBTiles fra SkovPlan) og læg fliserne i telefonens lager, så det virker uden net. */
+async function loadOrtho(f) {
+  toast("Læser ortofoto " + f.name + " …", 60000);
+  SQL = SQL || await initSqlJs({ locateFile: n => "lib/" + n });
+  const g = new SQL.Database(sqliteBytes(await f.arrayBuffer()));
+  try {
+    const meta = {};
+    (g.exec("SELECT name, value FROM metadata")[0]?.values || []).forEach(([k, v]) => meta[k] = v);
+    const total = g.exec("SELECT count(*) FROM tiles")[0].values[0][0];
+    if (!total) throw new Error("filen har ingen fliser");
+    await db.clear("tiles");
+    const st = g.prepare("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles");
+    const type = /png/i.test(meta.format || "") ? "image/png" : "image/jpeg";
+    let batch = [], done = 0, minz = 99, maxz = 0;
+    while (st.step()) {
+      const [z, x, row, data] = st.get();
+      minz = Math.min(minz, z); maxz = Math.max(maxz, z);
+      batch.push([`${z}/${x}/${(1 << z) - 1 - row}`, new Blob([data], { type })]);
+      if (batch.length >= 300) { await db.putMany("tiles", batch); done += batch.length; batch = []; toast(`Gemmer ortofoto … ${Math.round(done / total * 100)} %`, 60000); }
+    }
+    st.free(); if (batch.length) await db.putMany("tiles", batch);
+    state.ortho = { name: f.name, minzoom: minz, maxzoom: maxz, attribution: meta.attribution || "Ortofoto",
+      bounds: meta.bounds ? meta.bounds.split(",").map(Number) : null, loaded: new Date().toISOString(), tiles: total };
+    await db.put("kv", state.ortho, "ortofoto");
+    setBasemap(0); restyle();
+    if (!state.data && state.ortho.bounds) { const b = state.ortho.bounds; map.fitBounds([[b[1], b[0]], [b[3], b[2]]]); }
+    toast(`Ortofoto gemt (${total} fliser) – virker uden net`, 4000);
+  } finally { g.close(); }
+}
 function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelinger).getBounds(), { padding: [20, 20] }); } catch (e) { /* tom */ } }
 
 /* ------------------------------------------------------------------ start */
@@ -605,8 +704,10 @@ function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelin
   try { await navigator.storage?.persist?.(); } catch (e) { /* ok */ }
   try {
     state.data = await db.get("kv", "skovkort");
+    state.ortho = await db.get("kv", "ortofoto");
     state.regs = await db.all("regs");
   } catch (e) { console.error(e); toast("Telefonens lager kunne ikke åbnes: " + e.message, 6000); }
+  const saved = safeLS("basemap"); setBasemap(saved === null ? 0 : +saved % BASEMAPS.length);
   if (state.data) { drawData(); fitData(); } else $("#empty").classList.remove("hidden");
   drawRegMarkers(); startGps();
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW", e));

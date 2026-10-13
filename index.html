@@ -23,15 +23,19 @@
 <div id="empty" class="overlay hidden">
   <div class="card">
     <h2>Velkommen</h2>
-    <p>Åbn skovens <b>GeoPackage</b> (fx <i>skovdriftsplan.gpkg</i> fra Google Drev). Kortet gemmes på telefonen og virker derefter uden net.</p>
-    <button class="primary big" data-act="openGpkg">Åbn skovkort (.gpkg)</button>
+    <p>Find ejendommens mappe i Google Drev (qgis › Projekter › …):</p>
+    <p>1. <b>skovdriftsplan.gpkg</b> i ejendomsmappen er skovkortet.<br>
+       2. <b>Ortofoto › ortofoto_feltapp.mbtiles</b> er ortofotoet.</p>
+    <p class="muted">Begge gemmes på telefonen og virker derefter uden net.</p>
+    <button class="primary big" data-act="openGpkg">1. Åbn skovkort</button>
+    <button class="big" data-act="openGpkg" style="margin-top:8px">2. Åbn ortofoto</button>
   </div>
 </div>
 
 <section id="sheet" class="sheet hidden"></section>
 
 <nav id="menu" class="hidden">
-  <button data-act="openGpkg">Åbn skovkort (.gpkg)</button>
+  <button data-act="openGpkg">Åbn skovkort / ortofoto</button>
   <button data-act="listAll">Alle registreringer</button>
   <button data-act="export">Eksportér til SkovPlan</button>
   <button data-act="basemap">Skift baggrundskort</button>
@@ -39,7 +43,7 @@
   <p class="muted" id="menuInfo"></p>
 </nav>
 
-<input type="file" id="gpkgInput" accept=".gpkg,application/geopackage+sqlite3,application/octet-stream" hidden>
+<input type="file" id="gpkgInput" accept=".gpkg,.mbtiles,application/geopackage+sqlite3,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" multiple hidden>
 <input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
 <div id="toast" class="hidden"></div>
 
