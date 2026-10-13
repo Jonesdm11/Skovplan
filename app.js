@@ -418,9 +418,11 @@ function startGps() {
       meMarker = L.marker([lat, lon], { icon: L.divIcon({ className: "", html: '<div class="me-dot"></div>', iconSize: [18, 18] }), interactive: false }).addTo(map);
       meCircle = L.circle([lat, lon], { radius: accuracy, color: "#1a73e8", weight: 1, fillOpacity: 0.08, interactive: false }).addTo(map);
     } else { meMarker.setLatLng([lat, lon]); meCircle.setLatLng([lat, lon]).setRadius(accuracy); }
-    if (follow) map.setView([lat, lon], Math.max(map.getZoom(), 16));
+    const km = kmFromForest(lat, lon);
+    if (follow && km <= 1) map.setView([lat, lon], Math.max(map.getZoom(), 16));
     const st = standAt(lon, lat);
-    $("#where").textContent = (st ? `Du står i ${standLabel(st.properties)} · ` : "") + `±${Math.round(accuracy)} m`;
+    $("#where").textContent = km > 1 ? `${state.data?.name || ""} · du er ${fmt(km, km < 10 ? 1 : 0)} km væk`
+      : (st ? `Du står i ${standLabel(st.properties)} · ` : "") + `±${Math.round(accuracy)} m`;
   }, err => toast("GPS er ikke tilgængelig" + (err.message ? ": " + err.message : "")), { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
 }
 function inRing(x, y, ring) {
@@ -439,10 +441,26 @@ function standAt(lon, lat) {
   }
   return null;
 }
+/* Afstand (km) fra et punkt til skovens ramme; 0 inde i skoven. */
+function kmFromForest(lat, lon) {
+  if (!state.data) return 0;
+  let b; try { b = L.geoJSON(state.data.layers.skovafdelinger).getBounds(); } catch (e) { return 0; }
+  if (!b.isValid()) return 0;
+  const near = L.latLng(Math.min(Math.max(lat, b.getSouth()), b.getNorth()), Math.min(Math.max(lon, b.getWest()), b.getEast()));
+  return map.distance(L.latLng(lat, lon), near) / 1000;
+}
 $("#btnLocate").onclick = () => {
-  if (state.me) { follow = true; map.setView([state.me.lat, state.me.lon], Math.max(map.getZoom(), 16)); const st = standAt(state.me.lon, state.me.lat); if (st) selectStand(st); }
-  else toast("Venter på GPS …");
+  if (!state.me) return toast("Venter på GPS …");
+  const km = kmFromForest(state.me.lat, state.me.lon);
+  if (km > 1) { follow = false; fitData(); return toast(`Du er ca. ${fmt(km, km < 10 ? 1 : 0)} km fra ${state.data?.name || "skoven"}, så kortet viser skoven.`, 5000); }
+  follow = true; map.setView([state.me.lat, state.me.lon], Math.max(map.getZoom(), 16));
+  const st = standAt(state.me.lon, state.me.lat); if (st) selectStand(st);
 };
+/* Knap: vis hele skoven */
+L.Control.Fit = L.Control.extend({ options: { position: "bottomright" }, onAdd() {
+  const b = L.DomUtil.create("button", "fit-btn"); b.type = "button"; b.title = "Vis hele skoven"; b.setAttribute("aria-label", "Vis hele skoven"); b.textContent = "⤢";
+  L.DomEvent.on(b, "click", e => { L.DomEvent.stop(e); follow = false; fitData(); }); return b; } });
+new L.Control.Fit().addTo(map);
 map.on("dragstart", () => { follow = false; });
 
 /* ------------------------------------------------------------------ bundark (UI) */
@@ -477,8 +495,9 @@ function selectStand(f) {
       <button data-act="note">✎ Note</button>
     </div>
     <button class="big" data-act="taksation">Taksér litraet direkte (Hg, Dg, stamtal …)</button>
-    ${regs.length ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${s.plots} prøveflade${s.plots === 1 ? "" : "r"} ·
-      Hg ${fmt(s.Hg)} m · Dg ${fmt(s.Dg)} cm · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha${s.Bk !== undefined ? ` · Bk ${fmt(s.Bk, 0)} %` : ""}</div>` : ""}
+    ${s.plots || s.Hg != null || s.Dg != null ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${[s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "",
+      s.Hg != null ? `Hg ${fmt(s.Hg)} m` : "", s.Dg != null ? `Dg ${fmt(s.Dg)} cm` : "", s.N ? `${fmt(s.N, 0)} stk/ha` : "",
+      s.G ? `G ${fmt(s.G)} m²/ha` : "", s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ")}</div>` : ""}
     <ul class="list">${regs.filter(r => !r.data.parent).map(regItem).join("")}</ul>`);
   hydrateThumbs();
 }
@@ -618,7 +637,8 @@ function taxForm(reg) {
     <div class="row">${f("tHg", "Hg (m)", d.hg)}${f("tDg", "Dg (cm)", d.dg)}</div>
     <div class="row">${f("tN", "Stamtal (pr. ha)", d.n, "numeric")}${f("tG", "Grundflade (m²/ha)", d.g)}</div>
     <div class="row">${f("tV", "Vedmasse (m³/ha)", d.v)}${f("tBk", "Bk (%)", d.bk, "numeric")}</div>
-    <label>Ny træart (kun hvis den er forkert)</label><input id="tArt" value="${esc(d.art || "")}">
+    <label>Ny træart (kun hvis den er forkert)</label><select id="tArt"><option value="">Uændret (${esc(reg.stand.art || "–")})</option>
+      ${speciesOptions(d.art).map(a => `<option${a === d.art ? " selected" : ""}>${esc(a)}</option>`).join("")}</select>
     <label>Note</label><textarea id="tNote">${esc(d.note || "")}</textarea>
     <div class="stack"><button class="primary big" id="tSave">Gem taksation</button>
     ${reg._new ? "" : '<button class="danger" id="tDel">Slet</button>'}</div>`, true);
@@ -838,7 +858,8 @@ async function doExport() {
   const file = new File([blob], name, { type: "application/zip" });
   const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
   openSheet(`<div class="head"><h3>Gem eksporten</h3><button class="close">Luk</button></div>
-    <p><b>${esc(name)}</b> · ${blob.size < 1048576 ? Math.max(1, Math.round(blob.size / 1024)) + " kB" : fmt(blob.size / 1048576, 1) + " MB"} · ${state.regs.length} registreringer</p>
+    ${syncCfg() ? `<p class="ok-note">Online-synk er slået til, så registreringerne sendes automatisk til SkovPlan, når telefonen har net. Filen her er kun en ekstra sikkerhedskopi.</p>` : ""}
+    <p><b>${esc(name)}</b> · ${blob.size < 1048576 ? Math.max(1, Math.round(blob.size / 1024)) + " kB" : fmt(blob.size / 1048576, 1) + " MB"} · ${state.regs.length} registrering${state.regs.length === 1 ? "" : "er"}</p>
     ${canShare ? `<p>Tryk <b>Gem på Drev</b>, vælg <b>Drev</b> og gem i mappen <b>SkovPlan Felt</b>.
       Drev husker mappen næste gang.</p>` : `<p>Filen hentes til telefonens Overførsler. Læg den i Drev-mappen <b>SkovPlan Felt</b>.</p>`}
     <p class="muted">På pc'en henter SkovPlan den selv med «Hent data fra app».</p>
@@ -925,6 +946,8 @@ function refreshMenuInfo() {
   $("#menuInfo").textContent = `${state.data ? (state.data.name + " · indlæst " + new Date(state.data.loaded).toLocaleDateString("da-DK")) : "Intet skovkort"} · ${state.ortho ? "ortofoto gemt" : "intet ortofoto"} · ${n} registreringer` +
     (c ? ` · online: ${ns ? ns + " venter" : "alt sendt"}${state.syncStatus ? " (" + state.syncStatus + ")" : ""}` : (ne ? `, ${ne} ikke eksporteret` : ""));
   $("#btnSync")?.classList.toggle("hidden", !c);
+  $("#btnMenu").classList.toggle("pending", c ? ns > 0 : ne > 0);
+  $("#btnMenu").title = c ? (ns ? `${ns} venter på at blive sendt` : "Alt er sendt til SkovPlan") : (ne ? `${ne} ikke eksporteret` : "");
   $("#btnUpdatePkg")?.classList.toggle("hidden", !onlinePackageUrl());
   $("#btnChoose")?.classList.toggle("hidden", !safeLS("kundeUrl"));
 }
