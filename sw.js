@@ -1,5 +1,5 @@
 /* SkovPlan Felt – service worker: appen virker uden net, og kortfliser gemmes, når de er set. */
-const APP = "skovplan-felt-v17";
+const APP = "skovplan-felt-v18";
 const TILES = "skovplan-felt-tiles";
 const SHELL = ["./", "index.html", "app.js", "style.css", "manifest.webmanifest", "favicon.png", "apple-touch-icon.png", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
   "logo.png", "logo-symbol.png",

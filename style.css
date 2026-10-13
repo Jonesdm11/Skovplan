@@ -191,3 +191,9 @@ details.help p { margin: 6px 0; }
 #sight .small { font-size: 13px; opacity: .9; }
 #sight .vin { background: #1f7a45; color: #fff; border: 0; }
 #sight .vgr { background: #ffe9a8; color: #222; border: 0; }
+.sg-edge { position: absolute; width: 0; height: 120px; border-left: 3px solid #00e5ff; transform: translateX(-1.5px); }
+.sg-det { position: absolute; transform: translateX(-50%); padding: 6px 10px; border-radius: 10px; font-weight: 600; white-space: nowrap; max-width: 90vw; white-space: normal; text-align: center; }
+.sg-det.in { background: #1f7a45; color: #fff; }
+.sg-det.out { background: rgba(0,0,0,.7); color: #fff; }
+.sg-det.bord { background: #ffe9a8; color: #222; }
+.sg-det.unk { background: rgba(0,0,0,.7); color: #ffd; }

@@ -703,6 +703,42 @@ const CAL_KEY = "sigteKalibrering";
 function sightCal() { try { const c = JSON.parse(safeLS(CAL_KEY) || "null"); return c && c.f > 0 ? c : null; } catch (e) { return null; } }
 const sightF = c => c.f * innerWidth / c.w;           // skalér, hvis skærmbredden har ændret sig (fx drejet)
 const sightPx = (baf, f) => 2 * f * Math.tan(Math.asin(Math.sqrt(baf) / 100));
+/* Find stammens bredde, hvor brugeren trykker: et vandret bånd af billedet (5 rækkeblokke) undersøges fra trykpunktet
+   og ud til hver side, til farven skifter tydeligt fra stammens. Medianen af blokkenes bredder bruges.
+   Returnerer bredden i skærm-pixels og kanterne, eller null hvis stammen ikke kan skelnes fra baggrunden. */
+function trunkWidth(video, sx, sy) {
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !vh) return null;
+  const W = innerWidth, H = innerHeight, k = Math.max(W / vw, H / vh), x0 = (W - vw * k) / 2, y0 = (H - vh * k) / 2;
+  const vx = Math.round((sx - x0) / k), vy = Math.round((sy - y0) / k);
+  const band = Math.max(10, Math.round(vh * 0.02)), blocks = 5, rows = band * blocks;
+  const top = Math.max(0, Math.min(vh - rows, vy - Math.floor(rows / 2)));
+  const cv = trunkWidth.cv || (trunkWidth.cv = document.createElement("canvas"));
+  cv.width = vw; cv.height = rows;
+  const g = cv.getContext("2d", { willReadFrequently: true }); g.drawImage(video, 0, top, vw, rows, 0, 0, vw, rows);
+  const px = g.getImageData(0, 0, vw, rows).data, widths = [], lefts = [], rights = [];
+  for (let b = 0; b < blocks; b++) {
+    const prof = new Float32Array(vw * 3);                    // gennemsnitsfarve pr. kolonne i blokken
+    for (let y = b * band; y < (b + 1) * band; y++) for (let x = 0; x < vw; x++) { const i = (y * vw + x) * 4; prof[x * 3] += px[i]; prof[x * 3 + 1] += px[i + 1]; prof[x * 3 + 2] += px[i + 2]; }
+    for (let i = 0; i < prof.length; i++) prof[i] /= band;
+    const col = x => [prof[x * 3], prof[x * 3 + 1], prof[x * 3 + 2]];
+    const ref = [0, 0, 0]; let n = 0;
+    for (let x = Math.max(0, vx - 3); x <= Math.min(vw - 1, vx + 3); x++) { const c = col(x); ref[0] += c[0]; ref[1] += c[1]; ref[2] += c[2]; n++; }
+    ref[0] /= n; ref[1] /= n; ref[2] /= n;
+    const dist = x => { const c = col(x); return Math.hypot(c[0] - ref[0], c[1] - ref[1], c[2] - ref[2]); };
+    // tærskel: halvvejs mellem stammens egen variation og kontrasten til omgivelserne
+    const inner = Math.max(...[-2, -1, 1, 2].map(o => dist(Math.max(0, Math.min(vw - 1, vx + o)))));
+    const far = Math.max(dist(Math.max(0, vx - Math.round(vw * 0.15))), dist(Math.min(vw - 1, vx + Math.round(vw * 0.15))));
+    const T = Math.max(28, inner * 2.5, Math.min(far * 0.5, 80));
+    const edge = dir => { let x = vx; for (; x > 0 && x < vw - 1; x += dir) if (dist(x) > T && dist(x + dir) > T) return x; return null; };
+    const L = edge(-1), R = edge(1);
+    if (L !== null && R !== null && R - L > 3) { widths.push(R - L - 1); lefts.push(L + 0.5); rights.push(R - 0.5); }   // L og R er første kolonne uden for stammen
+  }
+  if (widths.length < 3) return null;
+  const med = a => [...a].sort((p, q) => p - q)[Math.floor(a.length / 2)];
+  const w = med(widths), spread = (Math.max(...widths) - Math.min(...widths)) / w;
+  if (spread > 0.35) return null;                              // blokkene er uenige: kanten er ikke tydelig
+  return { w: w * k, left: x0 + med(lefts) * k, right: x0 + med(rights) * k, sure: spread < 0.15 };
+}
 async function openSight(d, api) {
   const box = document.createElement("div"); box.id = "sight";
   box.innerHTML = `<video id="sgVid" playsinline muted autoplay></video>
@@ -727,8 +763,23 @@ async function openSight(d, api) {
     const c = sightCal(); if (!c) return calibrate();
     const w = sightPx(d.baf, sightF(c)), s = vinkelStats(d);
     $("#sgOver").innerHTML = `<div class="sg-gap" style="width:${w.toFixed(1)}px"></div>`;
-    $("#sgMsg").innerHTML = `<b>Ind</b>, hvis stammen er bredere end åbningen. <b>Grænse</b>, hvis den er lige så bred.
-      <br><span class="small">Sigt i brysthøjde (1,3 m). Drej en hel omgang. Et træ på 30 cm er grænsetræ i ${fmt(reachM(30, d.baf), 1)} m afstand.</span>`;
+    $("#sgMsg").innerHTML = `<b>Tryk på stammen</b> i brysthøjde, så måler appen, om den er bredere end åbningen. Du kan også selv trykke Ind eller Grænse.
+      <br><span class="small">Drej en hel omgang. Et træ på 30 cm er grænsetræ i ${fmt(reachM(30, d.baf), 1)} m afstand.</span>`;
+    const ov = $("#sgOver");
+    ov.onpointerdown = e => {
+      const i = Math.min(api.art(), d.counts.length - 1), r = trunkWidth($("#sgVid"), e.clientX, e.clientY);
+      const mark = (cls, txt, x = e.clientX) => { ov.querySelectorAll(".sg-det,.sg-edge").forEach(n => n.remove());
+        ov.insertAdjacentHTML("beforeend", (r ? `<div class="sg-edge" style="left:${r.left}px;top:${e.clientY - 60}px"></div><div class="sg-edge" style="left:${r.right}px;top:${e.clientY - 60}px"></div>` : "")
+          + `<div class="sg-det ${cls}" style="left:${Math.min(Math.max(x, 130), innerWidth - 130)}px;top:${e.clientY + 70}px">${txt}</div>`); };
+      if (!r) { mark("unk", "Kan ikke se stammens kanter. Vurdér selv."); return; }
+      // stammens vinkelbredde (rigtig også uden for midten af billedet) sammenlignet med sigtets vinkel
+      const f = sightF(c), cx = innerWidth / 2, ang = Math.atan((r.right - cx) / f) - Math.atan((r.left - cx) / f);
+      const ratio = ang / (2 * Math.asin(Math.sqrt(d.baf) / 100));
+      // ±8 % om åbningens bredde regnes som grænsetræ; sikre ind-træer tælles med det samme
+      if (ratio > 1.08 && r.sure) { api.bump(i, "ind"); count(); mark("in", `Ind ✓ (${fmt(ratio, 2)}× åbningen)`); }
+      else if (ratio < 0.92 && r.sure) mark("out", `Ude (${fmt(ratio, 2)}× åbningen) – tælles ikke`);
+      else mark("bord", `Tæt på grænsen (${fmt(ratio, 2)}×). Tryk Ind eller Grænse selv.`);
+    };
     const i = Math.min(api.art(), d.counts.length - 1), row = d.counts[i];
     $("#sgBottom").innerHTML = `
       <div class="sg-arts">${d.counts.map((r, k) => `<button data-art="${k}" class="${k === i ? "on" : ""}">${esc(r.art)} <b>${fmtCnt((num(r.ind) || 0) + 0.5 * (num(r.gr) || 0))}</b></button>`).join("")}</div>
