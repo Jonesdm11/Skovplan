@@ -143,3 +143,4 @@ table.stokke td.v { font-size: 13px; text-align: right; white-space: nowrap; wid
 table.stokke button { padding: 6px 10px; }
 .search { display: flex; gap: 8px; margin: 10px 0 4px; }
 .search input { flex: 1; }
+input[readonly] { background: #f1f4f1; color: #1f3d2a; font-weight: 600; }

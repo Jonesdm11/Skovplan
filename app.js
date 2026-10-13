@@ -821,7 +821,7 @@ function pileText(r) {
     (r.type === "stak" && extra.flis ? ` · ${fmt(extra.flis, 1)} m³ flis` : "") + (r.type === "stok" && extra.n ? ` · ${fmt(extra.n, 0)} stk` : "") +
     [d.sortiment, d.art].filter(Boolean).map(x => " · " + esc(x)).join("");
 }
-function pileBase(reg) {
+function pileBase(reg, extra = "") {
   const d = reg.data, inp = (id, lbl, v, list) => `<label>${lbl}</label><input id="${id}" value="${esc(v ?? "")}"${list ? ` list="${list}"` : ""} autocomplete="off">`;
   const known = k => [...new Set(state.allRegs.filter(r => r.data?.[k]).map(r => r.data[k]))];
   return `
@@ -830,16 +830,20 @@ function pileBase(reg) {
     <div class="row"><div><label>Træart</label><select id="pArt"><option value="">–</option>
       ${["Blandet", ...speciesOptions(d.art)].map(a => `<option${a === d.art ? " selected" : ""}>${esc(a)}</option>`).join("")}</select></div>
       <div>${inp("pSort", "Sortiment", d.sortiment, "dlSort")}</div></div>
+    ${extra}
     <datalist id="dlSort">${[...new Set([...SORTIMENTER, ...known("sortiment")])].map(s => `<option value="${esc(s)}">`).join("")}</datalist>
-    ${inp("pKunde", "Køber", d.kunde, "dlKunde")}<datalist id="dlKunde">${known("kunde").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
-    <div class="row"><div>${inp("pOrdre", "Ordre / aftale", d.ordre)}</div><div>${inp("pHugst", "Hugst", d.hugst, "dlHugst")}</div></div>
-    <datalist id="dlHugst">${known("hugst").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    ${inp("pKunde", "Kunde (køber)", d.kunde, "dlKunde")}<datalist id="dlKunde">${known("kunde").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    ${inp("pOrdre", "Ordre", d.ordre, "dlOrdre")}<datalist id="dlOrdre">${known("ordre").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    ${inp("pHugst", "Hugstopgave", d.hugst, "dlHugst")}<datalist id="dlHugst">${known("hugst").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    ${inp("pAfd", "Afdeling", d.afdeling ?? reg.stand?.label ?? "")}
+    ${inp("pSkover", "Skover", d.skover, "dlSkover")}<datalist id="dlSkover">${known("skover").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
     ${inp("pUdk", "Udkører", d.udkoerer, "dlUdk")}<datalist id="dlUdk">${known("udkoerer").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
     <label>Bemærkning</label><textarea id="pNote">${esc(d.note || "")}</textarea>`;
 }
 function readPileBase(reg) {
   Object.assign(reg.data, { nr: $("#pNr").value.trim(), art: $("#pArt").value, sortiment: $("#pSort").value.trim(), kunde: $("#pKunde").value.trim(),
-    ordre: $("#pOrdre").value.trim(), hugst: $("#pHugst").value.trim(), udkoerer: $("#pUdk").value.trim(), note: $("#pNote").value.trim() });
+    ordre: $("#pOrdre").value.trim(), hugst: $("#pHugst").value.trim(), afdeling: $("#pAfd").value.trim(), skover: $("#pSkover").value.trim(),
+    udkoerer: $("#pUdk").value.trim(), note: $("#pNote").value.trim() });
 }
 function pileFooter(reg) {
   return `<div class="stack"><button class="primary big" id="pSave">Gem</button>
@@ -861,25 +865,27 @@ function stakForm(reg) {
   const d = reg.data, f = (id, lbl, v) => `<div><label>${lbl}</label><input id="${id}" inputmode="decimal" value="${esc(typeof v === "number" ? String(v).replace(".", ",") : v ?? "")}"></div>`;
   openSheet(`
     <div class="head"><h3>${reg._new ? "Ny stak" : "Stak " + esc(d.nr)}${reg.stand ? " · " + esc(reg.stand.label) : ""}</h3><button data-act="pileList" class="close">Fortryd</button></div>
-    <div class="seg" id="sType">${Object.entries(STAK_TYPES).map(([k, v]) => `<button type="button" data-t="${k}" class="${d.type === k ? "on" : ""}">${v}</button>`).join("")}</div>
-    <h4>Mål</h4>
+    <h4>Grunddata</h4>${pileBase(reg, `<label>Type</label>
+    <div class="seg" id="sType">${Object.entries(STAK_TYPES).map(([k, v]) => `<button type="button" data-t="${k}" class="${d.type === k ? "on" : ""}">${v}</button>`).join("")}</div>`)}
+    <h4>Målinger</h4>
     <div class="row3">${f("sL", "Længde (m)", d.l)}${f("sD", "Dybde (m)", d.d)}${f("sH", "Højde (m)", d.h)}</div>
     <p class="muted small">Målt flere steder? Skriv målene med mellemrum, fx «2,1 2,4 2,2», så bruges gennemsnittet.</p>
     <div class="row"><div><label>Fastmasse</label><select id="sPre">${FASTMASSE.map(([n, p]) => `<option value="${p}">${n} (${p} %)</option>`).join("")}<option value="">Egen</option></select></div>
       ${f("sPct", "Fastmasse (%)", d.pct)}</div>
-    <div class="row" id="sFlisRow">${f("sK", "Flis pr. m³ fast", d.faktor)}<div></div></div>
-    <div class="result" id="sRes"></div>
-    <h4>Grunddata</h4>${pileBase(reg)}${pileFooter(reg)}`, true);
+    <div class="row"><div><label>Rummeter</label><input id="sRm" readonly tabindex="-1"></div><div><label>Volumen (m³ fast)</label><input id="sVol" readonly tabindex="-1"></div></div>
+    <div class="row">${f("sK", "Konverteringsfaktor (flis)", d.faktor)}<div><label>Flis rummeter</label><input id="sFlis" readonly tabindex="-1"></div></div>
+    <p class="muted small" id="sRes"></p>
+    ${pileFooter(reg)}`, true);
   const pre = $("#sPre"), match = FASTMASSE.find(([n, p]) => n === d.preset) || FASTMASSE.find(([, p]) => p === num(d.pct));
   pre.selectedIndex = match ? FASTMASSE.indexOf(match) : FASTMASSE.length;
   const read = () => Object.assign(d, { l: $("#sL").value.trim(), d: $("#sD").value.trim(), h: $("#sH").value.trim(), pct: num($("#sPct").value),
     faktor: num($("#sK").value), preset: pre.value ? FASTMASSE[pre.selectedIndex][0] : "" });
   const show = () => {
     read(); const c = stakCalc(d);
-    $("#sFlisRow").classList.toggle("hidden", d.type !== "flis");
-    $("#sRes").innerHTML = c.rm === null ? "Udfyld længde, dybde og højde." :
-      `<b>${fmt(c.rm, 1)} rm</b> stak${c.fast !== null ? ` · <b>${fmt(c.fast, 1)} m³ fast</b>` : ""}${c.flis !== null ? ` · <b>${fmt(c.flis, 1)} m³ flis</b>` : ""}` +
-      ([c.L, c.D, c.H].some((x, i) => x !== null && String([d.l, d.d, d.h][i]).trim().split(/[\s;+\/]+/).length > 1) ? `<br><span class="muted">Gennemsnit: ${fmt(c.L, 2)} × ${fmt(c.D, 2)} × ${fmt(c.H, 2)} m</span>` : "");
+    $("#sRm").value = c.rm === null ? "" : fmt(c.rm, 2); $("#sVol").value = c.fast === null ? "" : fmt(c.fast, 2);
+    $("#sFlis").value = c.flis === null ? (d.type === "flis" ? "" : "– (kun flis)") : fmt(c.flis, 2);
+    $("#sRes").textContent = c.rm === null ? "Udfyld længde, dybde og højde; resten regnes ud." :
+      ([c.L, c.D, c.H].some((x, i) => x !== null && String([d.l, d.d, d.h][i]).trim().split(/[\s;+\/]+/).length > 1) ? `Gennemsnit: ${fmt(c.L, 2)} × ${fmt(c.D, 2)} × ${fmt(c.H, 2)} m` : "");
   };
   pre.onchange = () => { if (pre.value) $("#sPct").value = pre.value; show(); };
   $("#sType").onclick = e => { const b = e.target.closest("[data-t]"); if (!b) return; d.type = b.dataset.t;
@@ -895,12 +901,13 @@ function stokForm(reg) {
   const d = reg.data; d.stokke = d.stokke?.length ? d.stokke : [{ n: 1, l: "", d: "" }];
   openSheet(`
     <div class="head"><h3>${reg._new ? "Ny stok" : "Stok " + esc(d.nr)}${reg.stand ? " · " + esc(reg.stand.label) : ""}</h3><button data-act="pileList" class="close">Fortryd</button></div>
-    <h4>Stokke</h4>
+    <h4>Grunddata</h4>${pileBase(reg)}
+    <h4>Målinger</h4>
     <p class="muted small">Længde og diameter på midten af stokken. Ens stokke kan stå på samme linje med et antal.</p>
     <table class="stokke"><thead><tr><th>#</th><th>Antal</th><th>Længde m</th><th>Midtdiam. cm</th><th>m³</th><th></th></tr></thead><tbody id="kRows"></tbody></table>
     <button id="kAdd" type="button">+ Stok</button>
     <div class="result" id="kRes"></div>
-    <h4>Grunddata</h4>${pileBase(reg)}${pileFooter(reg)}`, true);
+    ${pileFooter(reg)}`, true);
   const draw = (focus) => {
     $("#kRows").innerHTML = d.stokke.map((t, i) => `<tr><td>${i + 1}</td>
       <td><input data-i="${i}" data-k="n" inputmode="numeric" value="${esc(t.n ?? 1)}"></td>
@@ -922,7 +929,7 @@ function stokForm(reg) {
 function newPile(type) {
   const base = { id: uid(), _new: true, type, created: new Date().toISOString(), ...pos(), stand: currentStand() };
   const last = state.allRegs.filter(r => r.type === type).sort((a, b) => b.created.localeCompare(a.created))[0]?.data || {};
-  const keep = { art: last.art || "", sortiment: last.sortiment || "", kunde: last.kunde || "", ordre: last.ordre || "", hugst: last.hugst || "", udkoerer: last.udkoerer || "" };
+  const keep = { art: last.art || "", sortiment: last.sortiment || "", kunde: last.kunde || "", ordre: last.ordre || "", hugst: last.hugst || "", skover: last.skover || "", udkoerer: last.udkoerer || "" };
   if (type === "stak") return stakForm({ ...base, data: { nr: nextPileNr(), type: last.type || "flis", pct: last.pct ?? 20, preset: last.preset ?? FASTMASSE[0][0], faktor: last.faktor ?? 2.8, ...keep } });
   stokForm({ ...base, data: { nr: nextPileNr(), stokke: [], ...keep } });
 }
@@ -931,7 +938,7 @@ function pileList(q) {
   q = q ?? state.pileQuery ?? ""; state.pileQuery = q;
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
   const all = state.regs.filter(r => r.type === "stak" || r.type === "stok").sort((a, b) => b.created.localeCompare(a.created));
-  const hay = r => [r.type, r.data.nr, r.data.art, r.data.sortiment, r.data.kunde, r.data.ordre, r.data.hugst, r.data.udkoerer, r.data.note, r.stand?.label,
+  const hay = r => [r.type, r.data.nr, r.data.art, r.data.sortiment, r.data.kunde, r.data.ordre, r.data.hugst, r.data.udkoerer, r.data.skover, r.data.afdeling, r.data.note, r.stand?.label,
     STAK_TYPES[r.data.type], r.created.slice(0, 10)].filter(Boolean).join(" ").toLowerCase();
   const shown = all.filter(r => words.every(w => hay(r).includes(w)));
   const total = shown.reduce((a, r) => a + (pileM3(r) || 0), 0), flis = shown.reduce((a, r) => a + (r.type === "stak" ? stakCalc(r.data).flis || 0 : 0), 0);
@@ -986,13 +993,13 @@ function buildTreeCsv() {
 }
 /* Stakke og stokke, én række pr. stak/stok – åbner direkte i Excel. */
 function buildPileCsv() {
-  const head = ["Hvad", "Nr", "Dato", "Type", "Træart", "Sortiment", "Køber", "Ordre", "Hugst", "Udkører", "Afd", "Litra", "Længde (m)", "Dybde (m)", "Højde (m)",
+  const head = ["Hvad", "Nr", "Dato", "Type", "Træart", "Sortiment", "Kunde", "Ordre", "Hugstopgave", "Afdeling", "Skover", "Udkører", "Afd", "Litra", "Længde (m)", "Dybde (m)", "Højde (m)",
     "Rummeter", "Fastmasse (%)", "m³ fast", "Flis-faktor", "m³ flis", "Antal stokke", "Bemærkning", "Bredde", "Længde"];
   const lines = [head.join(";")];
   const piles = state.regs.filter(r => r.type === "stak" || r.type === "stok").sort((a, b) => (parseInt(a.data.nr, 10) || 0) - (parseInt(b.data.nr, 10) || 0));
   for (const r of piles) {
     const d = r.data, c = r.type === "stak" ? stakCalc(d) : {}, k = r.type === "stok" ? stokCalc(d) : {};
-    lines.push([r.type === "stak" ? "Stak" : "Stok", d.nr, r.created.slice(0, 10), r.type === "stak" ? STAK_TYPES[d.type] || "" : "", d.art, d.sortiment, d.kunde, d.ordre, d.hugst, d.udkoerer,
+    lines.push([r.type === "stak" ? "Stak" : "Stok", d.nr, r.created.slice(0, 10), r.type === "stak" ? STAK_TYPES[d.type] || "" : "", d.art, d.sortiment, d.kunde, d.ordre, d.hugst, d.afdeling ?? r.stand?.label ?? "", d.skover, d.udkoerer,
       r.stand?.afd ?? "", r.stand?.litra ?? "", csvNum(c.L, 2), csvNum(c.D, 2), csvNum(c.H, 2), csvNum(c.rm, 2), r.type === "stak" ? csvNum(num(d.pct), 0) : "",
       csvNum(r.type === "stak" ? c.fast : k.m3, 2), r.type === "stak" && d.type === "flis" ? csvNum(num(d.faktor), 2) : "", csvNum(c.flis, 2), r.type === "stok" ? k.n : "", d.note || "",
       r.lat ? r.lat.toFixed(6).replace(".", ",") : "", r.lon ? r.lon.toFixed(6).replace(".", ",") : ""].map(csvCell).join(";"));
@@ -1014,7 +1021,7 @@ function buildGeoJSON() {
       if (r.type === "stak" || r.type === "stok") {
         const d = r.data, c = r.type === "stak" ? stakCalc(d) : null, k = r.type === "stok" ? stokCalc(d) : null;
         Object.assign(props, { stak_nr: d.nr || null, sortiment: d.sortiment || null, traeart: d.art || null, koeber: d.kunde || null, ordre: d.ordre || null,
-          hugst: d.hugst || null, udkoerer: d.udkoerer || null, volumen_m3: (c ? c.fast : k.m3) != null ? +(c ? c.fast : k.m3).toFixed(2) : null,
+          hugst: d.hugst || null, udkoerer: d.udkoerer || null, skover: d.skover || null, afdeling: d.afdeling || null, volumen_m3: (c ? c.fast : k.m3) != null ? +(c ? c.fast : k.m3).toFixed(2) : null,
           rummeter: c?.rm != null ? +c.rm.toFixed(2) : null, flis_rm: c?.flis != null ? +c.flis.toFixed(2) : null, fastmasse_pct: c ? d.pct : null,
           stak_type: c ? STAK_TYPES[d.type] || null : null, antal_stokke: k ? k.n : null, maal_json: JSON.stringify(d) });
       }
