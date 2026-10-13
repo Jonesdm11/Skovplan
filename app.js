@@ -926,6 +926,7 @@ function refreshMenuInfo() {
     (c ? ` · online: ${ns ? ns + " venter" : "alt sendt"}${state.syncStatus ? " (" + state.syncStatus + ")" : ""}` : (ne ? `, ${ne} ikke eksporteret` : ""));
   $("#btnSync")?.classList.toggle("hidden", !c);
   $("#btnUpdatePkg")?.classList.toggle("hidden", !onlinePackageUrl());
+  $("#btnChoose")?.classList.toggle("hidden", !safeLS("kundeUrl"));
 }
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
@@ -938,6 +939,7 @@ const ACTIONS = {
   newPlot: () => newReg("proeveflade"), note: () => newReg("note"), taksation: () => newReg("taksation"),
   generalNote: () => newReg("note", true),
   packageLink: askPackageLink,
+  chooseProperty: () => chooseProperty(),
   updatePackage: () => { const u = onlinePackageUrl(); u ? downloadPackage(u) : askPackageLink(); },
   install: async () => {
     if (state.installPrompt) { state.installPrompt.prompt(); const r = await state.installPrompt.userChoice; state.installPrompt = null;
@@ -1024,8 +1026,34 @@ async function downloadPackage(url) {
     await openFiles([new File(parts, "feltpakke.zip", { type: "application/zip" })]);
   } catch (err) { console.error(err); toast("Feltpakken kunne ikke hentes: " + err.message, 7000); }
 }
+/* Kunde med flere ejendomme: …/?kunde=<kunde.json>. Kunden vælger ejendom; én ad gangen ligger på telefonen. */
+async function chooseProperty(url) {
+  url = url || safeLS("kundeUrl");
+  if (!url) return askPackageLink();
+  if (!navigator.onLine) return toast("Telefonen har ikke net lige nu. Prøv igen, når den har.", 5000);
+  let info;
+  try {
+    const res = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    info = await res.json();
+  } catch (err) { return toast("Listen over ejendomme kunne ikke hentes: " + err.message, 6000); }
+  safeLS("kundeUrl", url);
+  const list = info.ejendomme || [];
+  $("#empty").classList.add("hidden");
+  openSheet(`<div class="head"><h3>${esc(info.kunde || "Vælg ejendom")}</h3><button class="close">Luk</button></div>
+    <p class="muted">Vælg den ejendom, du skal ud i. Kort og ortofoto hentes og virker derefter uden net. Du kan skifte senere under menuen.</p>
+    <ul class="list">${list.map((e, i) => `<li><div class="grow"><b>${esc(e.navn)}</b>${state.data?.name === e.navn ? '<br><span class="muted">på telefonen nu</span>' : ""}</div>
+      <button class="primary" data-pick="${i}">Hent</button></li>`).join("")}</ul>`);
+  sheet.querySelectorAll("button[data-pick]").forEach(b => b.onclick = async () => {
+    const e = list[+b.dataset.pick]; closeSheet();
+    if (state.data && state.data.name !== e.navn && syncCfg()) { try { await syncNow(false); } catch (err) { /* sendes senere */ } }
+    downloadPackage(e.url);
+  });
+}
 function askPackageLink() {
-  const url = packageUrlFrom(prompt("Indsæt linket til feltpakken, som du har fået fra SkovPlan:"));
+  const text = prompt("Indsæt linket, som du har fået fra SkovPlan:");
+  try { const k = new URL(String(text || "").trim()).searchParams.get("kunde"); if (k) return chooseProperty(new URL(k).href); } catch (e) { /* ikke et kundelink */ }
+  const url = packageUrlFrom(text);
   if (url) downloadPackage(url); else toast("Det ligner ikke et link fra SkovPlan");
 }
 async function loadGpkg(g, f, meta) {
@@ -1082,8 +1110,11 @@ function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelin
   if (state.data) { drawData(); fitData(); }
   showWelcome();
   drawRegMarkers(); startGps();
-  const linked = packageUrlFrom(new URLSearchParams(location.search).get("pakke") ? location.href : "");
-  if (linked) { history.replaceState(null, "", location.pathname); downloadPackage(linked); }
+  const params = new URLSearchParams(location.search);
+  const linked = packageUrlFrom(params.get("pakke") ? location.href : "");
+  let customer = null; try { customer = params.get("kunde") ? new URL(params.get("kunde")).href : null; } catch (e) { /* ugyldigt */ }
+  if (linked || customer) history.replaceState(null, "", location.pathname);
+  if (customer) chooseProperty(customer); else if (linked) downloadPackage(linked);
   if (syncCfg()) { state.syncHash = safeLS("syncHash:" + syncCfg().noegle); scheduleSync(); }
   // Installér som app (Android/Chrome viser sin egen dialog; iPhone: Del › Føj til hjemmeskærm)
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
