@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f5d3a">
+<title>SkovPlan Felt</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="lib/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="top">
+  <button id="btnMenu" class="icon" aria-label="Menu">☰</button>
+  <div id="title">SkovPlan Felt<small id="where"></small></div>
+  <button id="btnLocate" class="icon" aria-label="Find mig">◎</button>
+</header>
+
+<div id="map"></div>
+
+<div id="empty" class="overlay hidden">
+  <div class="card">
+    <h2>Velkommen</h2>
+    <p>Åbn skovens <b>GeoPackage</b> (fx <i>skovdriftsplan.gpkg</i> fra Google Drev). Kortet gemmes på telefonen og virker derefter uden net.</p>
+    <button class="primary big" data-act="openGpkg">Åbn skovkort (.gpkg)</button>
+  </div>
+</div>
+
+<section id="sheet" class="sheet hidden"></section>
+
+<nav id="menu" class="hidden">
+  <button data-act="openGpkg">Åbn skovkort (.gpkg)</button>
+  <button data-act="listAll">Alle registreringer</button>
+  <button data-act="export">Eksportér til SkovPlan</button>
+  <button data-act="basemap">Skift baggrundskort</button>
+  <button data-act="clearRegs" class="danger">Slet eksporterede registreringer</button>
+  <p class="muted" id="menuInfo"></p>
+</nav>
+
+<input type="file" id="gpkgInput" accept=".gpkg,application/geopackage+sqlite3,application/octet-stream" hidden>
+<input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
+<div id="toast" class="hidden"></div>
+
+<script src="lib/leaflet.js"></script>
+<script src="lib/sql-wasm.js"></script>
+<script src="lib/jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
