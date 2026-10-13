@@ -97,3 +97,10 @@ label.check { display: flex; gap: 10px; align-items: center; font-size: 16px; co
 label.check input { width: 22px; min-height: 22px; height: 22px; }
 .me-dot { width: 18px; height: 18px; border-radius: 50%; background: #1a73e8; border: 3px solid #fff;
   box-shadow: 0 0 6px rgba(0,0,0,.4); }
+
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.thumbs .thumb { position: relative; }
+.thumbs img { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; display: block; }
+.thumbs button { position: absolute; top: 2px; right: 2px; width: 24px; height: 24px; padding: 0; border-radius: 50%;
+  background: rgba(0,0,0,.6); color: #fff; border: 0; font-size: 16px; line-height: 24px; }
+.thumbs button { min-width: 0; min-height: 0; }

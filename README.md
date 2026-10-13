@@ -22,7 +22,9 @@ Appen kan også åbne `skovdriftsplan.gpkg` og `ortofoto_feltapp.mbtiles` hver f
 - Litraer farvet som i SkovPlan, veje, kortlinjer og ejendomsgrænse oven på ortofotoet.
 - GPS-position og hvilket litra du står i; tryk på et litra for art, alder, Hg, Dg, stamtal, G, vedmasse og bemærkning.
 - **Prøveflade**: radius (5,64/7,98/10/12,62/15 m), træ-tabel med D1/D2 (krydsklupning), højde og bemærkning. Beregner stamtal/ha, G/ha, Dg (d³/d²) og Hg (grundfladevægtet).
-- **Direkte taksation**, **fotos** (1600 px) og **noter** med GPS-punkt og litra.
+- **Direkte taksation**, **fotos** (1600 px) og **noter** med GPS-punkt og litra. En note kan have flere billeder.
+- **Generel note** (menuen): note med billeder, der ikke hører til et litra, fx om veje eller hegn.
+- I SkovPlan står litraets noter og fotos i sin egen sektion **«Fra felten»** i litra-vinduet, ikke i bemærkningen.
 - Eksporten indeholder `taksationsark_felt_<dato>.csv`, `enkelttraeer_<dato>.csv`, `registreringer.geojson` og `fotos/`.
 
 ## Hosting

@@ -479,7 +479,7 @@ function selectStand(f) {
     <button class="big" data-act="taksation">Taksér litraet direkte (Hg, Dg, stamtal …)</button>
     ${regs.length ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${s.plots} prøveflade${s.plots === 1 ? "" : "r"} ·
       Hg ${fmt(s.Hg)} m · Dg ${fmt(s.Dg)} cm · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha${s.Bk !== undefined ? ` · Bk ${fmt(s.Bk, 0)} %` : ""}</div>` : ""}
-    <ul class="list">${regs.map(regItem).join("")}</ul>`);
+    <ul class="list">${regs.filter(r => !r.data.parent).map(regItem).join("")}</ul>`);
   hydrateThumbs();
 }
 
@@ -488,9 +488,10 @@ function regItem(r) {
   let txt = "";
   if (r.type === "proeveflade") { const s = plotStats(r.data); txt = `Prøveflade r=${fmt(r.data.radius, 2)} m · ${s.n} træer · Dg ${fmt(s.Dg)} · ${fmt(s.N, 0)} stk/ha`; }
   else if (r.type === "foto") txt = "Foto" + (r.data.note ? ": " + esc(r.data.note) : "");
-  else if (r.type === "note") txt = esc(r.data.note);
+  else if (r.type === "note") { const n = childPhotos(r).length; txt = (r.data.general ? "<b>Generel note</b>" + (r.data.note ? ": " : "") : "") + esc(r.data.note) + (n ? ` · 📷 ${n}` : ""); }
   else if (r.type === "taksation") txt = `Taksation: Hg ${fmt(num(r.data.hg))} · Dg ${fmt(num(r.data.dg))} · ${fmt(num(r.data.n), 0)} stk/ha`;
-  return `<li data-id="${r.id}">${r.type === "foto" ? `<img data-thumb="${r.id}" alt="">` : ""}
+  const thumb = r.type === "foto" ? r.id : r.type === "note" ? childPhotos(r)[0]?.id : null;
+  return `<li data-id="${r.id}">${thumb ? `<img data-thumb="${thumb}" alt="">` : ""}
     <div class="grow">${txt}<br><span class="muted">${when}${r.stand ? " · " + esc(r.stand.label) : ""}${r.exported ? " · eksporteret" : ""}</span></div>
     <button data-act="edit" data-id="${r.id}">Ret</button></li>`;
 }
@@ -630,23 +631,63 @@ function taxForm(reg) {
   if ($("#tDel")) $("#tDel").onclick = () => deleteReg(reg);
 }
 
-/* -------- note / foto */
+/* -------- note / foto
+   En note kan have flere billeder. Hvert billede gemmes som sin egen «foto»-registrering med data.parent = notens id,
+   så SkovPlan, synk og eksport behandler dem som før. En generel note hører ikke til et litra (stand = null). */
+const childPhotos = reg => state.regs.filter(r => r.type === "foto" && r.data.parent === reg.id);
 function noteForm(reg) {
+  if (reg.type === "foto" && reg.data.parent) { const p = state.regs.find(r => r.id === reg.data.parent); if (p) return editReg(p.id); }
+  const isNote = reg.type === "note";
+  reg._add = reg._add || []; reg._drop = reg._drop || [];
+  const title = reg.type === "foto" ? "Foto" : reg.data.general ? "Generel note" : "Note";
   openSheet(`
-    <div class="head"><h3>${reg.type === "foto" ? "Foto" : "Note"} · ${esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
+    <div class="head"><h3>${title}${reg.data.general ? "" : " · " + esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
     ${reg.photo ? `<img id="nImg" style="width:100%;border-radius:10px;margin:6px 0" alt="">` : ""}
     <label>${reg.type === "foto" ? "Tekst til billedet" : "Note"}</label><textarea id="nNote">${esc(reg.data.note || "")}</textarea>
+    ${isNote ? `<div id="nPhotos" class="thumbs"></div>
+    <div class="actions"><button id="nCam">📷 Tag billede</button><button id="nGal">🖼 Vælg billeder</button></div>` : ""}
     <div class="stack"><button class="primary big" id="nSave">Gem</button>${reg._new ? "" : '<button class="danger" id="nDel">Slet</button>'}</div>`);
   if (reg.photo) $("#nImg").src = URL.createObjectURL(reg.photo);
+  if (isNote) {
+    state.noteDraft = reg;
+    const draw = () => {
+      const kept = childPhotos(reg).filter(c => !reg._drop.includes(c.id)).map(c => ({ id: c.id, blob: c.photo }));
+      const all = [...kept, ...reg._add];
+      $("#nPhotos").innerHTML = all.map(x => `<span class="thumb"><img data-ph="${x.id}" alt=""><button data-rm="${x.id}" aria-label="Fjern">×</button></span>`).join("");
+      all.forEach(x => { const img = $("#nPhotos").querySelector(`img[data-ph="${x.id}"]`); if (img && x.blob) img.src = URL.createObjectURL(x.blob); });
+      $("#nPhotos").querySelectorAll("button[data-rm]").forEach(b => b.onclick = ev => {
+        ev.preventDefault(); ev.stopPropagation(); const id = b.dataset.rm;
+        if (reg._add.some(x => x.id === id)) reg._add = reg._add.filter(x => x.id !== id); else reg._drop.push(id);
+        draw();
+      });
+    };
+    reg._draw = draw; draw();
+    $("#nCam").onclick = () => $("#photoInput").click();
+    $("#nGal").onclick = () => $("#galleryInput").click();
+  }
   $("#nSave").onclick = async () => {
     reg.data.note = $("#nNote").value.trim();
-    if (reg.type === "note" && !reg.data.note) return toast("Noten er tom");
-    await saveReg(reg); toast("Gemt"); backToStand(reg);
+    const photos = isNote ? childPhotos(reg).filter(c => !reg._drop.includes(c.id)).length + reg._add.length : 0;
+    if (isNote && !reg.data.note && !photos) return toast("Skriv en note eller tilføj et billede");
+    const add = reg._add || [], drop = reg._drop || [];
+    for (const k of ["_add", "_drop", "_draw"]) delete reg[k];
+    state.noteDraft = null;
+    await saveReg(reg);
+    if (isNote) {
+      for (const id of drop) { await db.del("regs", id); state.regs = state.regs.filter(r => r.id !== id); }
+      for (const c of childPhotos(reg)) if (c.data.note !== reg.data.note) { c.data.note = reg.data.note; await saveReg(c); }
+      for (const x of add) await saveReg({ id: x.id, type: "foto", created: x.created, lat: reg.lat, lon: reg.lon, accuracy: reg.accuracy,
+        stand: reg.stand, data: { note: reg.data.note, parent: reg.id, general: !!reg.data.general }, photo: x.blob });
+      if (drop.length) { drawRegMarkers(); refreshMenuInfo(); scheduleSync(true); }
+    }
+    toast("Gemt"); backToStand(reg);
   };
   if ($("#nDel")) $("#nDel").onclick = () => deleteReg(reg);
 }
 async function takePhoto(file) {
   const blob = await shrinkImage(file, 1600, 0.82);
+  const draft = state.noteDraft;
+  if (draft && $("#nPhotos")) { draft._add.push({ id: uid(), blob, created: new Date().toISOString() }); return draft._draw(); }
   const stand = currentStand();
   noteForm({ id: uid(), _new: true, type: "foto", created: new Date().toISOString(), ...pos(), stand, data: { note: "", filename: file.name }, photo: blob });
 }
@@ -667,12 +708,12 @@ function currentStand() {
   if (state.me) { const f = standAt(state.me.lon, state.me.lat); if (f) return standInfo(f.properties); }
   return null;
 }
-function newReg(type) {
-  const stand = currentStand();
+function newReg(type, general = false) {
+  const stand = general ? null : currentStand();
   const base = { id: uid(), _new: true, type, created: new Date().toISOString(), ...pos(), stand };
   if (type === "proeveflade") return plotForm({ ...base, data: { radius: 10, trees: [], hg: null, bk: null, note: "" } });
   if (type === "taksation") return stand ? taxForm({ ...base, data: {} }) : toast("Vælg et litra først");
-  if (type === "note") return noteForm({ ...base, data: { note: "" } });
+  if (type === "note") return noteForm({ ...base, data: general ? { note: "", general: true } : { note: "" } });
 }
 async function saveReg(reg) {
   delete reg._new; reg.updated = new Date().toISOString(); delete reg.exported; delete reg.synced;
@@ -683,10 +724,13 @@ async function saveReg(reg) {
 }
 async function deleteReg(reg) {
   if (!confirm("Slet denne registrering?")) return;
-  await db.del("regs", reg.id); state.regs = state.regs.filter(r => r.id !== reg.id);
+  const gone = new Set([reg.id, ...childPhotos(reg).map(c => c.id)]);
+  for (const id of gone) await db.del("regs", id);
+  state.regs = state.regs.filter(r => !gone.has(r.id)); state.noteDraft = null;
   drawRegMarkers(); restyle(); refreshMenuInfo(); backToStand(reg); scheduleSync(true);
 }
 function backToStand(reg) {
+  state.noteDraft = null;
   const f = reg.stand && state.data?.layers.skovafdelinger.features.find(x => standKey(x.properties) === reg.stand.key);
   f ? selectStand(f) : listAll();
 }
@@ -705,9 +749,10 @@ function editReg(id) {
 }
 function listAll() {
   state.selected = null; restyle();
-  const regs = [...state.regs].sort((a, b) => b.created.localeCompare(a.created));
+  const regs = state.regs.filter(r => !r.data.parent).sort((a, b) => b.created.localeCompare(a.created));
   openSheet(`<div class="head"><h3>Alle registreringer (${regs.length})</h3><button class="close">Luk</button></div>
     <div class="actions"><button class="primary" data-act="newPlot">+ Prøveflade</button><button data-act="photo">📷 Foto</button><button data-act="note">✎ Note</button></div>
+    <button class="big" data-act="generalNote">✎ Generel note (ikke knyttet til et litra)</button>
     ${regs.length ? `<ul class="list">${regs.map(regItem).join("")}</ul>` : '<p class="muted">Ingen registreringer endnu. Tryk på et litra på kortet for at begynde.</p>'}
     <button class="primary big" data-act="export">Eksportér til SkovPlan</button>`);
   hydrateThumbs();
@@ -726,16 +771,11 @@ function buildTaxCsv() {
   let rows = 0;
   for (const key of keys) {
     const regs = by[key], st = regs[0].stand, s = standSummary(regs);
-    const notes = regs.filter(r => r.data.note).map(r => r.data.note);
-    const plots = regs.filter(r => r.type === "proeveflade");
-    const radii = [...new Set(plots.map(p => fmt(p.data.radius, 2)))].join("/");
-    const head = plots.length ? `${plots.length} prøveflade${plots.length === 1 ? "" : "r"} (r=${radii} m)` : "";
-    const photos = regs.filter(r => r.type === "foto").length;
-    const bem = [`Felt ${today()}`, head, photos ? `${photos} foto` : "", ...notes].filter(Boolean).join("; ");
+    // Noter og fotos går ikke i litraets bemærkning; SkovPlan viser dem for sig under «Fra felten».
     const hasMeasure = ["Hg", "Dg", "N", "G", "V", "Bk"].some(k => s[k] !== undefined && s[k] !== null) || s.art;
-    if (!hasMeasure && !notes.length) continue;
+    if (!hasMeasure) continue;
     lines.push([st.afd, st.litra, csvNum(standArea(key) || st.areal, 2), st.art, "", hasMeasure ? YEAR : "",
-      csvNum(s.Hg, 1), csvNum(s.Dg, 1), csvNum(s.N, 0), csvNum(s.G, 1), csvNum(s.V, 0), csvNum(s.Bk, 0), bem, s.art || "", ""].map(csvCell).join(";"));
+      csvNum(s.Hg, 1), csvNum(s.Dg, 1), csvNum(s.N, 0), csvNum(s.G, 1), csvNum(s.V, 0), csvNum(s.Bk, 0), "", s.art || "", ""].map(csvCell).join(";"));
     rows++;
   }
   return { csv: "﻿" + lines.join("\r\n") + "\r\n", rows };
@@ -764,7 +804,7 @@ function buildGeoJSON() {
     features: state.regs.map(r => {
       const props = { id: r.id, type: r.type, oprettet: r.created, gps_noejagtighed_m: r.accuracy ? Math.round(r.accuracy) : null,
         afd: r.stand?.afd ?? null, litra: r.stand?.litra ?? null, litra_navn: r.stand?.label ?? null, compartment_id: r.stand?.compartment_id ?? null,
-        note: r.data.note || null };
+        note: r.data.note || null, note_id: r.data.parent || null, generel: r.data.general ? 1 : null };
       if (r.type === "proeveflade") { const s = plotStats(r.data); Object.assign(props, { radius_m: r.data.radius, antal_traeer: s.n, stamtal_ha: Math.round(s.N),
         grundflade_m2_ha: +s.G.toFixed(2), dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
       if (r.type === "taksation") Object.assign(props, { hg_m: r.data.hg, dg_cm: r.data.dg, stamtal_ha: r.data.n, grundflade_m2_ha: r.data.g, vedmasse_m3_ha: r.data.v, bk_pct: r.data.bk, ny_traeart: r.data.art || null });
@@ -895,6 +935,12 @@ const ACTIONS = {
   listAll, export: doExport, clearRegs: clearExported,
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
   newPlot: () => newReg("proeveflade"), note: () => newReg("note"), taksation: () => newReg("taksation"),
+  generalNote: () => newReg("note", true),
+  install: async () => {
+    if (state.installPrompt) { state.installPrompt.prompt(); const r = await state.installPrompt.userChoice; state.installPrompt = null;
+      if (r.outcome === "accepted") $("#btnInstall").classList.add("hidden"); return; }
+    alert("Tryk på Del-knappen (firkanten med pilen) i Safari og vælg «Føj til hjemmeskærm». Så ligger SkovPlan Felt som en app.");
+  },
   photo: () => $("#photoInput").click(),
   edit: el => editReg(el.dataset.id),
   cancelForm: () => { const f = state.selected; f ? selectStand(f) : closeSheet(); },
@@ -906,6 +952,7 @@ document.addEventListener("click", e => {
 });
 $("#btnMenu").onclick = () => { refreshMenuInfo(); $("#menu").classList.toggle("hidden"); };
 $("#photoInput").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) takePhoto(f); };
+$("#galleryInput").onchange = async e => { const fs = [...e.target.files]; e.target.value = ""; for (const f of fs) await takePhoto(f); };
 $("#gpkgInput").onchange = async e => {
   const files = [...e.target.files]; e.target.value = ""; if (files.length) openFiles(files);
 };
@@ -1003,5 +1050,9 @@ function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelin
   showWelcome();
   drawRegMarkers(); startGps();
   if (syncCfg()) { state.syncHash = safeLS("syncHash:" + syncCfg().noegle); scheduleSync(); }
+  // Installér som app (Android/Chrome viser sin egen dialog; iPhone: Del › Føj til hjemmeskærm)
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); state.installPrompt = e; $("#btnInstall")?.classList.remove("hidden"); });
+  if (!standalone && /iPhone|iPad/.test(navigator.userAgent)) $("#btnInstall")?.classList.remove("hidden");
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW", e));
 })();
