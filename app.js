@@ -694,6 +694,81 @@ function bafAdvice(reg) {
   return { baf: null, why: "" };
 }
 const SKOVTYPER = [["Åben skov, få og store træer", "G under ca. 15 m²/ha", 1], ["Almindelig skov", "G ca. 15–30 m²/ha", 2], ["Tæt skov, fx tæt nåleskov", "G over ca. 30 m²/ha", 4]];
+/* ------------------------------------------------------------------ kamerasigte til vinkeltælling
+   Kameraet virker som et nålehulskamera: et punkt i vinklen θ fra midten står f·tan θ pixels fra midten (f = brændvidde i
+   skærm-pixels). Kalibrering: et A4-ark på langs (29,7 cm) i kendt afstand D fylder S pixels → f = S·D/W.
+   Et træ er «ind», når d/(2R) > √BAF/100, dvs. vinklen er over 2·asin(√BAF/100); sigtet er 2·f·tan(asin(√BAF/100)) pixels bredt.
+   Kalibreringen gemmes på telefonen (pr. skærmbredde i stående format). */
+const CAL_KEY = "sigteKalibrering";
+function sightCal() { try { const c = JSON.parse(safeLS(CAL_KEY) || "null"); return c && c.f > 0 ? c : null; } catch (e) { return null; } }
+const sightF = c => c.f * innerWidth / c.w;           // skalér, hvis skærmbredden har ændret sig (fx drejet)
+const sightPx = (baf, f) => 2 * f * Math.tan(Math.asin(Math.sqrt(baf) / 100));
+async function openSight(d, api) {
+  const box = document.createElement("div"); box.id = "sight";
+  box.innerHTML = `<video id="sgVid" playsinline muted autoplay></video>
+    <div id="sgOver"></div>
+    <div class="sg-top"><div class="bafbig"><span>BAF</span><b>${fmt(d.baf, 0)}</b></div>
+      <div class="grow" id="sgMsg"></div><button id="sgClose" aria-label="Luk">✕</button></div>
+    <div class="sg-bottom" id="sgBottom"></div>`;
+  document.body.appendChild(box);
+  let stream = null;
+  const close = () => { stream?.getTracks().forEach(t => t.stop()); box.remove(); keepAwake(!!state.track); api.done(); };
+  $("#sgClose").onclick = close;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    const track = stream.getVideoTracks()[0], caps = track.getCapabilities?.() || {};
+    if (caps.zoom) { try { await track.applyConstraints({ advanced: [{ zoom: Math.max(caps.zoom.min, Math.min(1, caps.zoom.max)) }] }); } catch (e) { /* fast zoom */ } }
+    $("#sgVid").srcObject = stream; keepAwake(true);
+  } catch (e) {
+    $("#sgMsg").innerHTML = `<b>Kameraet kunne ikke åbnes.</b><br>${esc(e.message || e.name)}. Giv appen lov til kameraet i telefonens indstillinger, eller tæl med dit eget relaskop.`;
+    return;
+  }
+  const count = () => {
+    const c = sightCal(); if (!c) return calibrate();
+    const w = sightPx(d.baf, sightF(c)), s = vinkelStats(d);
+    $("#sgOver").innerHTML = `<div class="sg-gap" style="width:${w.toFixed(1)}px"></div>`;
+    $("#sgMsg").innerHTML = `<b>Ind</b>, hvis stammen er bredere end åbningen. <b>Grænse</b>, hvis den er lige så bred.
+      <br><span class="small">Sigt i brysthøjde (1,3 m). Drej en hel omgang. Et træ på 30 cm er grænsetræ i ${fmt(reachM(30, d.baf), 1)} m afstand.</span>`;
+    const i = Math.min(api.art(), d.counts.length - 1), row = d.counts[i];
+    $("#sgBottom").innerHTML = `
+      <div class="sg-arts">${d.counts.map((r, k) => `<button data-art="${k}" class="${k === i ? "on" : ""}">${esc(r.art)} <b>${fmtCnt((num(r.ind) || 0) + 0.5 * (num(r.gr) || 0))}</b></button>`).join("")}</div>
+      <div class="sg-sum">${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha${s.cnt > 20 ? " · mange træer: overvej højere BAF" : ""}</div>
+      <div class="sg-btns"><button id="sgUndo">↶</button><button id="sgGr" class="vgr">Grænse<b>${fmt(num(row.gr) || 0, 0)}</b></button>
+        <button id="sgIn" class="vin">Ind<b>${fmt(num(row.ind) || 0, 0)}</b></button></div>
+      <div class="sg-links"><button id="sgCal" class="linklike">Kalibrér igen</button><button id="sgDone" class="linklike">Færdig</button></div>`;
+    $("#sgIn").onclick = () => { api.bump(i, "ind"); count(); };
+    $("#sgGr").onclick = () => { api.bump(i, "gr"); count(); };
+    $("#sgUndo").onclick = () => { api.undo(); count(); };
+    $("#sgBottom").querySelector(".sg-arts").onclick = e => { const b = e.target.closest("[data-art]"); if (b) { api.art(+b.dataset.art); count(); } };
+    $("#sgCal").onclick = calibrate; $("#sgDone").onclick = close;
+  };
+  const calibrate = () => {
+    let L = innerWidth * 0.3, R = innerWidth * 0.7;
+    const old = sightCal();
+    const draw = () => { $("#sgOver").innerHTML = `<div class="sg-line" style="left:${L}px"></div><div class="sg-line" style="left:${R}px"></div>
+      <div class="sg-span" style="left:${Math.min(L, R)}px;width:${Math.abs(R - L)}px"></div>`; };
+    $("#sgMsg").innerHTML = `<b>Kalibrér kameraet (én gang pr. telefon)</b>
+      <br><span class="small">1. Sæt et A4-ark <b>på langs</b> på en stamme eller væg. 2. Stil dig præcis i afstanden nedenfor (mål med målebånd), og hold telefonen lodret i 1× zoom.
+      3. Træk de to streger ud til arkets kanter.</span>`;
+    $("#sgBottom").innerHTML = `<div class="row"><div><label>Afstand til arket (m)</label><input id="sgDist" inputmode="decimal" value="${fmt(old?.dist || 3, 2)}"></div>
+      <div><label>Arkets bredde (cm)</label><input id="sgW" inputmode="decimal" value="${fmt(old?.width || 29.7, 1)}"></div></div>
+      <div class="sg-btns"><button id="sgCancel">${old ? "Annullér" : "Luk"}</button><button id="sgSave" class="vin">Gem kalibrering</button></div>`;
+    draw();
+    const ov = $("#sgOver"); let drag = null;
+    ov.onpointerdown = e => { drag = Math.abs(e.clientX - L) < Math.abs(e.clientX - R) ? "L" : "R"; ov.setPointerCapture(e.pointerId); ov.onpointermove(e); };
+    ov.onpointermove = e => { if (!drag) return; if (drag === "L") L = e.clientX; else R = e.clientX; draw(); };
+    ov.onpointerup = ov.onpointercancel = () => { drag = null; };
+    $("#sgCancel").onclick = () => { ov.onpointerdown = ov.onpointermove = null; old ? count() : close(); };
+    $("#sgSave").onclick = () => {
+      const D = num($("#sgDist").value), W = num($("#sgW").value) / 100, S = Math.abs(R - L);
+      if (!D || D < 0.5 || !W || S < 10) return toast("Udfyld afstand og bredde, og træk stregerne ud til arkets kanter");
+      safeLS(CAL_KEY, JSON.stringify({ f: S * D / W, w: innerWidth, dist: D, width: W * 100, at: new Date().toISOString() }));
+      ov.onpointerdown = ov.onpointermove = null; toast("Kameraet er kalibreret"); count();
+    };
+  };
+  count();
+}
+
 function vinkelForm(reg) {
   const d = reg.data, adv = bafAdvice(reg), defArt = reg.stand?.art || "";
   if (!d.baf) d.baf = adv.baf;
@@ -737,6 +812,7 @@ function vinkelForm(reg) {
     $("#vBody").innerHTML = `
       <h4>Tæl træerne rundt om dig</h4>
       <p class="muted small">Drej en hel omgang. Er stammen bredere end sigtet, er træet <b>ind</b>. Er den lige så bred, er det et <b>grænsetræ</b> (tæller halvt).</p>
+      <button class="primary big" id="vCam" type="button">📷 Sigt med kameraet</button>
       <div id="vRows"></div>
       <div class="actions"><select id="vArt">${arts.map(a => `<option>${esc(a)}</option>`).join("")}</select><button id="vAddArt" type="button">+ Træart</button><button id="vUndo" type="button">↶ Fortryd</button></div>
       <div class="result" id="vRes"></div>
@@ -774,14 +850,18 @@ function vinkelForm(reg) {
       <td><button type="button" data-rm="${i}" aria-label="Fjern">×</button></td></tr>`).join("");
   };
   const wire = () => {
+    const bump = (i, k) => { d.counts[i][k] = (num(d.counts[i][k]) || 0) + 1; hist.push([i, k]); if (navigator.vibrate) navigator.vibrate(25); drawRows(); };
+    const undo = () => { const h = hist.pop(); if (!h) return toast("Intet at fortryde"); d.counts[h[0]][h[1]] = Math.max(0, (num(d.counts[h[0]][h[1]]) || 0) - 1); drawRows(); };
     $("#vRows").onclick = e => {
       const b = e.target.closest("[data-in],[data-gr]"); if (!b) return;
-      const i = +(b.dataset.in ?? b.dataset.gr), k = b.dataset.in !== undefined ? "ind" : "gr";
-      d.counts[i][k] = (num(d.counts[i][k]) || 0) + 1; hist.push([i, k]);
-      if (navigator.vibrate) navigator.vibrate(25);
-      drawRows();
+      bump(+(b.dataset.in ?? b.dataset.gr), b.dataset.in !== undefined ? "ind" : "gr");
     };
-    $("#vUndo").onclick = () => { const h = hist.pop(); if (!h) return toast("Intet at fortryde"); d.counts[h[0]][h[1]] = Math.max(0, (num(d.counts[h[0]][h[1]]) || 0) - 1); drawRows(); };
+    $("#vUndo").onclick = undo;
+    let artIdx = 0;
+    $("#vCam").onclick = () => {
+      if (!navigator.mediaDevices?.getUserMedia) return toast("Telefonens browser giver ikke adgang til kameraet her");
+      openSight(d, { bump, undo, art: v => { if (v !== undefined) artIdx = v; return artIdx; }, done: () => drawRows() });
+    };
     $("#vAddArt").onclick = () => { const a = $("#vArt").value; if (d.counts.some(r => r.art === a)) return toast(a + " er allerede med");
       if (d.counts.length === 1 && d.counts[0].art === "Blandet" && !num(d.counts[0].ind) && !num(d.counts[0].gr)) d.counts = [];
       d.counts.push({ art: a, ind: 0, gr: 0 }); drawRows(); };

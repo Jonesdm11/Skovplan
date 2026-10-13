@@ -162,3 +162,32 @@ details.help p { margin: 6px 0; }
 .vrow .vin { background: #1f5f3a; color: #fff; border-color: #1f5f3a; }
 .vrow .vgr { background: #fff7e0; border-color: #e0c060; }
 .warn { margin-top: 6px; color: #8a5300; background: #fff4d6; border-radius: 8px; padding: 6px 8px; font-weight: 500; }
+/* kamerasigte */
+#sight { position: fixed; inset: 0; z-index: 3000; background: #000; color: #fff; touch-action: none; }
+#sight video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+#sgOver { position: absolute; inset: 0; }
+.sg-gap { position: absolute; top: 0; bottom: 0; left: 50%; transform: translateX(-50%); border-left: 2px solid #ffeb3b; border-right: 2px solid #ffeb3b;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.18); background: rgba(255,235,59,.06); }
+.sg-line { position: absolute; top: 0; bottom: 0; width: 0; border-left: 3px solid #ff5252; transform: translateX(-1.5px); }
+.sg-span { position: absolute; top: 45%; height: 10%; background: rgba(255,82,82,.18); }
+.sg-top { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 10px; align-items: flex-start; padding: calc(10px + env(safe-area-inset-top)) 12px 10px;
+  background: linear-gradient(rgba(0,0,0,.75), rgba(0,0,0,0)); line-height: 1.35; }
+.sg-top .bafbig { background: #ffeb3b; color: #111; }
+.sg-top button { background: rgba(255,255,255,.15); color: #fff; border: 0; font-size: 20px; padding: 6px 12px; border-radius: 10px; }
+.sg-bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); background: linear-gradient(rgba(0,0,0,0), rgba(0,0,0,.8) 30%); }
+.sg-bottom label { color: #eee; }
+.sg-arts { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+.sg-arts button { flex: 0 0 auto; background: rgba(255,255,255,.15); color: #fff; border: 1px solid rgba(255,255,255,.3); border-radius: 18px; padding: 6px 12px; }
+.sg-arts button.on { background: #fff; color: #111; }
+.sg-sum { text-align: center; font-weight: 600; margin: 4px 0 8px; }
+.sg-btns { display: flex; gap: 8px; }
+.sg-btns button { flex: 1; padding: 16px 8px; font-size: 18px; border-radius: 14px; display: flex; justify-content: space-between; align-items: center; }
+.sg-btns button b { font-size: 28px; }
+.sg-btns #sgUndo, .sg-btns #sgCancel { flex: 0 0 auto; justify-content: center; background: rgba(255,255,255,.15); color: #fff; border: 0; }
+.sg-btns #sgIn { flex: 1.4; }
+.sg-btns #sgSave { justify-content: center; }
+.sg-links { display: flex; justify-content: space-between; margin-top: 6px; }
+.sg-links .linklike { color: #cfe3ff; }
+#sight .small { font-size: 13px; opacity: .9; }
+#sight .vin { background: #1f7a45; color: #fff; border: 0; }
+#sight .vgr { background: #ffe9a8; color: #222; border: 0; }
