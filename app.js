@@ -17,10 +17,21 @@ const LAYERS = {
   adgangsveje: { style: { color: "#7a5230", weight: 3 } },
   kortlinjer: { style: { color: "#555", weight: 1.5, dashArray: "3 3" } },
   indgange: { style: { color: "#7a5230", radius: 5 } },
+  aflaegningspladser: { style: { color: "#5b3a17", fillColor: "#f2c14e", fillOpacity: 1, weight: 2, radius: 7 } },
+};
+/* Lokale hensyn fra feltpakken (feltlag.json): navn i menuen «Vis lag», stil og evt. tekst ved klik. */
+const EXTRA = {
+  naturtyper: { name: "§3-naturtyper", style: { color: "#0a8f5a", weight: 2, dashArray: "6 3", fillColor: "#0a8f5a", fillOpacity: 0.14 },
+    label: p => "§3 " + (p.Natyp_navn || "natur") },
+  diger: { name: "Beskyttede diger", style: { color: "#6b4f2a", weight: 3.5, dashArray: "2 5", lineCap: "round" },
+    info: p => "Beskyttet dige" + (p.Digetypebeskrivelse ? ": " + p.Digetypebeskrivelse : "") + (p.Stendige ? " (stendige)" : "") },
+  fortidsminde_zoner: { name: "Fortidsminders beskyttelseszone", style: { color: "#8a3ffc", weight: 1.5, dashArray: "4 4", fill: false } },
+  fortidsminder: { name: "Fortidsminder", style: { color: "#fff", weight: 2, fillColor: "#8a3ffc", fillOpacity: 1, radius: 7 },
+    info: p => "Fortidsminde: " + [p.anlaegstype, p.datering, p.frednr ? "fredningsnr. " + p.frednr : ""].filter(Boolean).join(" · ") },
 };
 const STAND_FIELDS = ["compartment_id", "navn", "afdeling", "afdeling_nr", "litra", "træart", "etableringsaar",
   "alder", "middelhoejde_m", "middeldiameter_cm", "stamtal_ha", "grundflade_m2_ha", "vedmasse_m3_ha",
-  "areal_ha", "bemærkning", "taksationsaar", "dataaar"];
+  "areal_ha", "bemærkning", "taksationsaar", "dataaar", "p3_status", "p3_naturtyper"];
 const RADII = [5.64, 7.98, 10, 12.62, 15];
 const YEAR = new Date().getFullYear();
 
@@ -144,7 +155,7 @@ function readGpkg(g, file) {
       if (!transform) { console.warn("Springer over", name, "srs", srs); continue; }
       const cols = g.exec(`PRAGMA table_info("${name}")`)[0].values.map(v => v[1]);
       const geomCol = (g.exec(`SELECT column_name FROM gpkg_geometry_columns WHERE table_name='${name}'`)[0]?.values[0][0]) || "geom";
-      const keep = name === "skovafdelinger" ? STAND_FIELDS.filter(c => cols.includes(c)) : cols.filter(c => ["navn", "type", "vejtype", "linjetype"].includes(c));
+      const keep = name === "skovafdelinger" ? STAND_FIELDS.filter(c => cols.includes(c)) : cols.filter(c => ["navn", "type", "vejtype", "linjetype", "sortiment", "aktivitet", "bemærkning"].includes(c));
       const sel = [`"${geomCol}"`, ...keep.map(c => `"${c}"`)].join(",");
       const res = g.exec(`SELECT ${sel} FROM "${name}"`)[0];
       const feats = [];
@@ -295,6 +306,7 @@ const colorFor = art => { const k = normName(art); return k ? (COLOR_LOOKUP[k] |
 
 function drawData() {
   state.overlays.forEach(l => map.removeLayer(l)); state.overlays = [];
+  (state.extraLabels || []).forEach(t => t.remove()); state.extraLabels = [];
   if (!state.data) return;
   const L_ = state.data.layers;
   for (const name of ["kortlinjer", "adgangsveje", "ejendomsgraense", "indgange"]) {
@@ -302,16 +314,37 @@ function drawData() {
     const lyr = L.geoJSON(L_[name], { style: () => st, pointToLayer: (f, ll) => L.circleMarker(ll, st), interactive: false }).addTo(map);
     state.overlays.push(lyr);
   }
+  const hidden = hiddenLayers(), extra = state.data.extra?.lag || {};
   const counts = countByStand();
   state.standLayer = L.geoJSON(L_.skovafdelinger, {
     style: f => standStyle(f, counts),
     onEachFeature: (f, lyr) => {
       lyr.on("click", () => selectStand(f));
-      lyr.bindTooltip(esc(standLabel(f.properties)) + (counts[standKey(f.properties)] ? " ●" : ""),
-        { permanent: true, direction: "center", className: "litra-label" });
+      lyr.bindTooltip(labelHtml(f.properties, true, counts), { permanent: true, direction: "center", className: "litra-label" });
     },
   }).addTo(map);
   state.overlays.push(state.standLayer);
+  // hensyn oven på litraerne: §3-naturtyper, diger, fortidsminder, aflægningspladser
+  state.extraLabels = [];
+  for (const [key, def] of Object.entries(EXTRA)) {
+    if (!extra[key] || hidden.has(key)) continue;
+    const lyr = L.geoJSON(extra[key], {
+      style: () => def.style, interactive: !!def.info,
+      pointToLayer: (f, ll) => L.circleMarker(ll, def.style),
+      onEachFeature: (f, l) => {
+        if (def.info) l.bindPopup(esc(def.info(f.properties)));
+        if (def.label) state.extraLabels.push(L.tooltip({ permanent: true, direction: "center", className: "natur-label", interactive: false })
+          .setLatLng(l.getBounds().getCenter()).setContent(esc(def.label(f.properties))));
+      },
+    }).addTo(map);
+    state.overlays.push(lyr);
+  }
+  if (L_.aflaegningspladser && !hidden.has("aflaegningspladser")) {
+    const st = LAYERS.aflaegningspladser.style;
+    const lyr = L.geoJSON(L_.aflaegningspladser, { pointToLayer: (f, ll) => L.circleMarker(ll, st),
+      onEachFeature: (f, l) => l.bindPopup(esc(["Aflægningsplads", f.properties.navn, f.properties.sortiment, f.properties["bemærkning"]].filter(Boolean).join(" · "))) }).addTo(map);
+    state.overlays.push(lyr);
+  }
   updateLabels();
   prepareAutoColors(new Set(L_.skovafdelinger.features.map(f => f.properties["træart"]))).then(restyle);
   $("#where").textContent = state.data.name || "";
@@ -323,9 +356,53 @@ function standStyle(f, counts) {
     fillColor: colorFor(f.properties["træart"]), fillOpacity: state.basemap === 2 ? 0.85 : 0.66 };
 }
 function restyle() { if (!state.standLayer) return; const c = countByStand(); state.standLayer.eachLayer(l => l.setStyle(standStyle(l.feature, c))); }
+/* Mærkaten som på SkovPlans kort (litra, art, år, §3), hvis feltpakken har den; ellers afd+litra.
+   Langt ude vises kun litraet, tæt på hele mærkaten. */
+function labelHtml(p, full, counts = countByStand()) {
+  const m = state.data?.extra?.maerkater?.[p.compartment_id];
+  const lines = m ? String(m).split(/\n/).filter(Boolean) : [standLabel(p)];
+  const shown = full ? lines : lines.slice(0, 1);
+  return shown.map(esc).join("<br>") + (counts[standKey(p)] ? " ●" : "");
+}
 function updateLabels() {
-  if (!state.standLayer) return; const show = map.getZoom() >= 14;
-  state.standLayer.eachLayer(l => { const t = l.getTooltip(); if (t) show ? l.openTooltip() : l.closeTooltip(); });
+  if (!state.standLayer) return; const z = map.getZoom(), show = z >= 14, full = z >= 16;
+  const counts = countByStand();
+  state.standLayer.eachLayer(l => {
+    const t = l.getTooltip(); if (!t) return;
+    if (t._full !== full) { t.setContent(labelHtml(l.feature.properties, full, counts)); t._full = full; }
+    show ? l.openTooltip() : l.closeTooltip();
+  });
+  (state.extraLabels || []).forEach(t => z >= 15 ? t.addTo(map) : t.remove());
+  if (show) requestAnimationFrame(declutter);
+}
+/* Som i SkovPlan: mærkater må ikke overlappe; det største litra vinder, de mindre skjules. */
+function declutter() {
+  if (!state.standLayer) return;
+  const area = l => { const b = l.getBounds(); return (b.getEast() - b.getWest()) * (b.getNorth() - b.getSouth()); };
+  const items = [];
+  state.standLayer.eachLayer(l => { const el = l.getTooltip()?.getElement(); if (el) { el.style.visibility = ""; items.push([area(l), el]); } });
+  items.sort((a, b) => b[0] - a[0]);
+  const placed = [];
+  for (const [, el] of items) {
+    const r = el.getBoundingClientRect();
+    if (!r.width) continue;
+    if (placed.some(q => r.left < q.right && r.right > q.left && r.top < q.bottom && r.bottom > q.top)) el.style.visibility = "hidden";
+    else placed.push(r);
+  }
+}
+map.on("moveend", () => state.standLayer && map.getZoom() >= 14 && requestAnimationFrame(declutter));
+function hiddenLayers() { try { return new Set(JSON.parse(safeLS("hiddenLayers") || "[]")); } catch (e) { return new Set(); } }
+function layerMenu() {
+  const extra = state.data?.extra?.lag || {}, hidden = hiddenLayers();
+  const items = Object.entries(EXTRA).filter(([k]) => extra[k]).map(([k, d]) => [k, d.name, extra[k].features.length]);
+  if (state.data?.layers.aflaegningspladser) items.push(["aflaegningspladser", "Aflægningspladser", state.data.layers.aflaegningspladser.features.length]);
+  openSheet(`<div class="head"><h3>Vis lag</h3><button class="close">Luk</button></div>
+    ${items.length ? items.map(([k, n, c]) => `<label class="check"><input type="checkbox" data-layer="${k}" ${hidden.has(k) ? "" : "checked"}> ${esc(n)} <span class="muted">(${c})</span></label>`).join("")
+      : `<p class="muted">Feltpakken har ingen naturtyper eller andre hensyn. Lav en ny feltpakke i SkovPlan, så kommer de med.</p>`}`);
+  sheet.querySelectorAll("[data-layer]").forEach(cb => cb.onchange = () => {
+    const h = hiddenLayers(); cb.checked ? h.delete(cb.dataset.layer) : h.add(cb.dataset.layer);
+    safeLS("hiddenLayers", JSON.stringify([...h])); (state.extraLabels || []).forEach(t => t.remove()); drawData(); restyle();
+  });
 }
 map.on("zoomend", updateLabels);
 function countByStand() { const c = {}; state.regs.forEach(r => { if (r.stand) c[r.stand.key] = (c[r.stand.key] || 0) + 1; }); return c; }
@@ -392,6 +469,7 @@ function selectStand(f) {
       ${fact(num(p.middelhoejde_m), "Hg m")}${fact(num(p.middeldiameter_cm), "Dg cm")}${fact(num(p.stamtal_ha), "stk/ha", 0)}
       ${fact(num(p.grundflade_m2_ha), "G m²/ha")}${fact(num(p.vedmasse_m3_ha), "m³/ha", 0)}${fact(p.taksationsaar || p.dataaar ? String(p.taksationsaar || p.dataaar) : null, "data fra")}
     </div>
+    ${p.p3_status === "Ja" ? `<p class="p3">§3-beskyttet${p.p3_naturtyper ? ": " + esc(p.p3_naturtyper) : ""}</p>` : ""}
     ${p["bemærkning"] ? `<p class="muted">${esc(p["bemærkning"])}</p>` : ""}
     <div class="actions">
       <button class="primary" data-act="newPlot">+ Prøveflade</button>
@@ -720,11 +798,17 @@ async function doExport() {
       Drev husker mappen næste gang.</p>` : `<p>Filen hentes til telefonens Overførsler. Læg den i Drev-mappen <b>SkovPlan Felt</b>.</p>`}
     <p class="muted">På pc'en henter SkovPlan den selv med «Hent data fra app».</p>
     <button class="primary big" id="btnShare">${canShare ? "Gem på Drev" : "Hent filen"}</button>`);
+  const download = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); };
   $("#btnShare").onclick = async () => {
     if (canShare) {
-      try { await navigator.share({ files: [file], title: name }); }
-      catch (e) { if (e.name === "AbortError") return; toast("Deling mislykkedes: " + e.message, 5000); return; }
-    } else { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
+      // Nogle telefoner afviser zip-filer i del-menuen; så prøves som almindelig fil, og ellers gemmes den i Overførsler.
+      let ok = false, err = null;
+      for (const f of [file, new File([blob], name, { type: "application/octet-stream" })]) {
+        try { await navigator.share({ files: [f] }); ok = true; break; }
+        catch (e) { if (e.name === "AbortError") return; err = e; console.warn("share", e); }
+      }
+      if (!ok) { download(); toast("Telefonen ville ikke dele filen (" + (err?.name || "fejl") + "), så den er gemt i Overførsler. Læg den i Drev-mappen SkovPlan Felt.", 9000); }
+    } else download();
     const t = new Date().toISOString();
     for (const r of state.regs) { r.exported = t; await db.put("regs", r); }
     closeSheet(); refreshMenuInfo(); toast(`Eksporteret: ${state.regs.length} registreringer, ${rows} litra i taksationsarket`, 4000);
@@ -746,6 +830,7 @@ function refreshMenuInfo() {
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
   welcome: () => showWelcome(true),
+  layers: layerMenu,
   closeWelcome: () => { if (!state.ortho) safeLS("skipOrtho", "1"); $("#empty").classList.add("hidden"); },
   listAll, export: doExport, clearRegs: clearExported,
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
@@ -777,6 +862,8 @@ async function openFiles(files) {
         let meta = null;
         const mj = zip.file(/feltpakke\.json$/i)[0];
         if (mj) try { meta = JSON.parse(await mj.async("string")); } catch (err) { /* ok */ }
+        const fl = zip.file(/feltlag\.json$/i)[0];
+        if (fl) try { meta = { ...(meta || {}), _extra: JSON.parse(await fl.async("string")) }; } catch (err) { console.warn("feltlag", err); }
         const inner = zip.file(/\.(gpkg|mbtiles)$/i);
         if (!inner.length) throw new Error(zip.file(/registreringer\.geojson$/i).length
           ? "det er en eksport fra appen. Den skal hentes ind i SkovPlan med «Hent data fra app»"
@@ -803,7 +890,7 @@ async function openFiles(files) {
 }
 async function loadGpkg(g, f, meta) {
   const data = readGpkg(g, f);
-  if (meta) data.pakke = meta;
+  if (meta) { const { _extra, ...pakke } = meta; data.pakke = pakke; if (_extra) data.extra = _extra; }
   await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData();
   toast(`Indlæst: ${data.layers.skovafdelinger.features.length} litradele`);
 }

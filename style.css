@@ -86,8 +86,14 @@ table.trees .del { min-height: 36px; padding: 4px 9px; color: var(--muted); }
 #toast { position: fixed; bottom: calc(24px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%);
   background: #222; color: #fff; padding: 10px 16px; border-radius: 20px; z-index: 2000; max-width: 90vw; font-size: 14px; }
 
-.litra-label { background: transparent; border: 0; box-shadow: none; font-weight: 700; color: #102014;
+.litra-label { text-align: center; line-height: 1.15; background: transparent; border: 0; box-shadow: none; font-weight: 700; color: #102014;
   text-shadow: 0 0 3px #fff, 0 0 3px #fff; font-size: 12px; padding: 0; }
 .litra-label::before { display: none; }
+.natur-label { background: rgba(255,255,255,.75); border: 1px solid #0a8f5a; color: #075e3b; font-size: 11px; font-weight: 600;
+  padding: 0 4px; border-radius: 4px; box-shadow: none; }
+.natur-label::before { display: none; }
+.p3 { background: #e3f4ec; color: #075e3b; border-radius: 8px; padding: 6px 10px; margin: 6px 0; font-size: 14px; font-weight: 600; }
+label.check { display: flex; gap: 10px; align-items: center; font-size: 16px; color: var(--fg); padding: 10px 0; border-top: 1px solid var(--line); margin: 0; }
+label.check input { width: 22px; min-height: 22px; height: 22px; }
 .me-dot { width: 18px; height: 18px; border-radius: 50%; background: #1a73e8; border: 3px solid #fff;
   box-shadow: 0 0 6px rgba(0,0,0,.4); }
