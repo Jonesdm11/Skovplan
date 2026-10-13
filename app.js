@@ -675,15 +675,16 @@ function newReg(type) {
   if (type === "note") return noteForm({ ...base, data: { note: "" } });
 }
 async function saveReg(reg) {
-  delete reg._new; reg.updated = new Date().toISOString(); delete reg.exported;
+  delete reg._new; reg.updated = new Date().toISOString(); delete reg.exported; delete reg.synced;
+  if (!reg.ejendom) reg.ejendom = state.data?.name || null;
   await db.put("regs", reg);
   const i = state.regs.findIndex(r => r.id === reg.id); i >= 0 ? state.regs[i] = reg : state.regs.push(reg);
-  drawRegMarkers(); restyle(); refreshMenuInfo();
+  drawRegMarkers(); restyle(); refreshMenuInfo(); scheduleSync();
 }
 async function deleteReg(reg) {
   if (!confirm("Slet denne registrering?")) return;
   await db.del("regs", reg.id); state.regs = state.regs.filter(r => r.id !== reg.id);
-  drawRegMarkers(); restyle(); refreshMenuInfo(); backToStand(reg);
+  drawRegMarkers(); restyle(); refreshMenuInfo(); backToStand(reg); scheduleSync(true);
 }
 function backToStand(reg) {
   const f = reg.stand && state.data?.layers.skovafdelinger.features.find(x => standKey(x.properties) === reg.stand.key);
@@ -772,13 +773,12 @@ function buildGeoJSON() {
     }),
   };
 }
-async function doExport() {
-  if (!state.regs.length) return toast("Der er intet at eksportere endnu");
+function buildExportZip(withPhotos = true) {
   const zip = new JSZip(), stamp = today(), { csv, rows } = buildTaxCsv();
   zip.file(`taksationsark_felt_${stamp}.csv`, csv);
   zip.file("registreringer.geojson", JSON.stringify({ ...buildGeoJSON(), skovplan: { ejendom: state.data?.name || null, ...(state.data?.pakke || {}) } }, null, 1));
   const trees = buildTreeCsv(); if (trees.rows) zip.file(`enkelttraeer_${stamp}.csv`, trees.csv);
-  state.regs.filter(r => r.photo).forEach(r => zip.file(photoName(r), r.photo));
+  if (withPhotos) state.regs.filter(r => r.photo).forEach(r => zip.file(photoName(r), r.photo));
   zip.file("LAES-MIG.txt", [
     `SkovPlan Felt – eksport ${new Date().toLocaleString("da-DK")}`, `Skov: ${state.data?.name || ""}`, "",
     "Hent filen ind i SkovPlan med «Hent data fra app» (Import og ældre driftsplaner).", "",
@@ -788,6 +788,11 @@ async function doExport() {
     "registreringer.geojson: alle prøveflader, fotos og noter som punkter (WGS84). Kan trækkes direkte ind i QGIS.",
     "fotos/: billederne; filnavnet står i feltet «foto» i geojson-filen.",
   ].join("\r\n"));
+  return { zip, rows, stamp };
+}
+async function doExport() {
+  if (!state.regs.length) return toast("Der er intet at eksportere endnu");
+  const { zip, rows, stamp } = buildExportZip(true);
   const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
   const name = `skovplan-felt_${(state.data?.name || "skov").replace(/[^\wæøåÆØÅ-]+/g, "_")}_${stamp}.zip`;
   const file = new File([blob], name, { type: "application/zip" });
@@ -822,15 +827,69 @@ async function clearExported() {
   state.regs = state.regs.filter(r => !r.exported); drawRegMarkers(); restyle(); refreshMenuInfo(); closeSheet();
 }
 
+/* ------------------------------------------------------------------ online synkronisering
+   Har feltpakken en «sync»-blok (Supabase), sendes registreringerne automatisk, når der er net:
+   først nye fotos (ét ad gangen), derefter hele eksporten uden fotos som én zip. SkovPlan henter selv. */
+const syncCfg = () => state.data?.pakke?.sync?.rest && state.data.pakke.sync.noegle ? state.data.pakke.sync : null;
+let syncTimer = null, syncing = false;
+function scheduleSync(force) {
+  if (!syncCfg()) return;
+  if (force) state.syncHash = null;
+  clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 2500);
+}
+async function rpc(fn, body) {
+  const c = syncCfg();
+  const res = await fetch(`${c.rest}/rpc/${fn}`, { method: "POST",
+    headers: { "Content-Type": "application/json", apikey: c.anon, Authorization: "Bearer " + c.anon }, body: JSON.stringify(body) });
+  if (!res.ok) { let m = ""; try { m = (await res.json()).message; } catch (e) { /* ok */ } throw new Error(m || "HTTP " + res.status); }
+  return res.json();
+}
+const b64 = async blob => { const b = new Uint8Array(await blob.arrayBuffer()); let s = ""; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(s); };
+async function syncNow(manual) {
+  const c = syncCfg();
+  if (!c) { if (manual) toast("Feltpakken har ingen online-synkronisering. Lav en ny feltpakke i SkovPlan.", 5000); return; }
+  if (syncing) return; if (!navigator.onLine) { if (manual) toast("Ingen forbindelse – sendes, når der er net"); return; }
+  syncing = true; setSyncStatus("sender …");
+  try {
+    const mine = state.regs.filter(r => !r.ejendom || r.ejendom === state.data.name);
+    for (const r of mine.filter(r => r.photo && !r.photoSynced)) {
+      await rpc("felt_foto", { p_noegle: c.noegle, p_navn: photoName(r).split("/").pop(), p_data: await b64(r.photo) });
+      r.photoSynced = new Date().toISOString(); await db.put("regs", r);
+    }
+    const hash = JSON.stringify(mine.map(r => [r.id, r.updated || r.created]));
+    if (mine.length && (hash !== state.syncHash || manual)) {
+      const all = state.regs; state.regs = mine;
+      let built; try { built = buildExportZip(false); } finally { state.regs = all; }
+      const zip64 = await built.zip.generateAsync({ type: "base64", compression: "DEFLATE" });
+      await rpc("felt_indsend", { p_noegle: c.noegle, p_navn: `skovplan-felt_${(state.data.name || "skov").replace(/[^\wæøåÆØÅ-]+/g, "_")}_${built.stamp}.zip`, p_zip: zip64, p_antal: mine.length });
+      state.syncHash = hash; safeLS("syncHash:" + c.noegle, hash);
+      const t = new Date().toISOString();
+      for (const r of mine) { r.synced = t; r.exported = r.exported || t; await db.put("regs", r); }
+    }
+    safeLS("syncAt:" + c.noegle, new Date().toISOString());
+    setSyncStatus("sendt " + new Date().toLocaleTimeString("da-DK", { hour: "2-digit", minute: "2-digit" }));
+    if (manual) toast(`Sendt til SkovPlan: ${mine.length} registreringer`, 3500);
+  } catch (err) {
+    console.warn("sync", err); setSyncStatus("ikke sendt (" + err.message + ")");
+    if (manual) toast("Kunne ikke sende: " + err.message, 6000);
+  } finally { syncing = false; refreshMenuInfo(); }
+}
+function setSyncStatus(t) { state.syncStatus = t; refreshMenuInfo(); }
+window.addEventListener("online", () => scheduleSync());
+
 /* ------------------------------------------------------------------ handlinger */
 function refreshMenuInfo() {
   const n = state.regs.length, ne = state.regs.filter(r => !r.exported).length;
-  $("#menuInfo").textContent = `${state.data ? (state.data.name + " · indlæst " + new Date(state.data.loaded).toLocaleDateString("da-DK")) : "Intet skovkort"} · ${state.ortho ? "ortofoto gemt" : "intet ortofoto"} · ${n} registreringer${ne ? `, ${ne} ikke eksporteret` : ""}`;
+  const c = syncCfg(), ns = state.regs.filter(r => !r.synced).length;
+  $("#menuInfo").textContent = `${state.data ? (state.data.name + " · indlæst " + new Date(state.data.loaded).toLocaleDateString("da-DK")) : "Intet skovkort"} · ${state.ortho ? "ortofoto gemt" : "intet ortofoto"} · ${n} registreringer` +
+    (c ? ` · online: ${ns ? ns + " venter" : "alt sendt"}${state.syncStatus ? " (" + state.syncStatus + ")" : ""}` : (ne ? `, ${ne} ikke eksporteret` : ""));
+  $("#btnSync")?.classList.toggle("hidden", !c);
 }
 const ACTIONS = {
   openGpkg: () => $("#gpkgInput").click(),
   welcome: () => showWelcome(true),
   layers: layerMenu,
+  sync: () => syncNow(true),
   closeWelcome: () => { if (!state.ortho) safeLS("skipOrtho", "1"); $("#empty").classList.add("hidden"); },
   listAll, export: doExport, clearRegs: clearExported,
   basemap: () => { setBasemap((state.basemap + 1) % BASEMAPS.length); restyle(); toast(BASEMAPS[state.basemap].name); },
@@ -891,7 +950,7 @@ async function openFiles(files) {
 async function loadGpkg(g, f, meta) {
   const data = readGpkg(g, f);
   if (meta) { const { _extra, ...pakke } = meta; data.pakke = pakke; if (_extra) data.extra = _extra; }
-  await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData();
+  await db.put("kv", data, "skovkort"); state.data = data; drawData(); fitData(); scheduleSync();
   toast(`Indlæst: ${data.layers.skovafdelinger.features.length} litradele`);
 }
 /* Læs ortofotoet (MBTiles fra SkovPlan) og læg fliserne i telefonens lager, så det virker uden net. */
@@ -942,5 +1001,6 @@ function fitData() { try { map.fitBounds(L.geoJSON(state.data.layers.skovafdelin
   if (state.data) { drawData(); fitData(); }
   showWelcome();
   drawRegMarkers(); startGps();
+  if (syncCfg()) { state.syncHash = safeLS("syncHash:" + syncCfg().noegle); scheduleSync(); }
   if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(e => console.warn("SW", e));
 })();

@@ -11,6 +11,11 @@ Adresse: https://jonesdm11.github.io/Skovplan/
 4. **Eksportér til SkovPlan (Drev):** gem zip-filen i Drev-mappen **SkovPlan Felt**.
 5. **I SkovPlan:** **Hent data fra app…** finder selv den nyeste eksport til ejendommen og indlæser litra-tal, prøveflader, fotos og noter.
 
+### Online-synkronisering (Supabase)
+Er synk sat op i SkovPlan («Opsæt online-synk med SkovPlan Felt…»), har feltpakken en ejendomsnøgle, og appen sender selv
+registreringer og fotos, når telefonen har net («Send til SkovPlan nu» i menuen tvinger det). SkovPlan henter dem, når ejendommen åbnes.
+Databasen oprettes med `skovplan_felt_opsaetning.sql` (ligger i projektfilerne under feltapp/supabase).
+
 Appen kan også åbne `skovdriftsplan.gpkg` og `ortofoto_feltapp.mbtiles` hver for sig. Filtypen afgøres af indholdet, ikke navnet.
 
 ## Det kan den
