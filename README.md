@@ -2,7 +2,7 @@
 
 En lille webapp, der installeres fra browseren ("Føj til startskærm") og virker uden net bagefter. Ingen app store.
 
-Adresse: https://jonesdm11.github.io/Skovplan/
+Adresse: https://skovplan.github.io/Skovplan/
 
 ## Sådan bruges den
 1. **I SkovPlan:** Import og ældre driftsplaner › **Lav feltpakke til appen…** Det laver `Eksporter/Feltapp/Feltpakke_<ejendom>.zip` med skovkort og ortofoto.
