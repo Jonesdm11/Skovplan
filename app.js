@@ -208,6 +208,9 @@ function standSummary(regs) {
     out.Hg = sum("_sgH") ? sum("_sgh") / sum("_sgH") : manual.length ? manual.reduce((a, b) => a + b, 0) / manual.length : null;
     const bks = plots.map(p => num(p.data.bk)).filter(v => v !== null);
     if (bks.length) out.Bk = bks.reduce((a, b) => a + b, 0) / bks.length;
+    // Vedmasse = G × Hg × formtal (SkovPlans stammekurve); uden målt højde bruges litraets Hg fra planen.
+    const st0 = regs[0]?.stand, v = out.G ? vinkelVolume({ G: out.G, Hg: out.Hg, Dg: out.Dg }, standProps(st0?.key), st0?.art) : null;
+    if (v) { out.V = v.V; out.Vinfo = v; }
   }
   if (tax) {
     const d = tax.data;
@@ -429,7 +432,7 @@ function startGps() {
     const st = standAt(lon, lat);
     $("#where").textContent = km > 1 ? `${state.data?.name || ""} · du er ${fmt(km, km < 10 ? 1 : 0)} km væk`
       : (st ? `Du står i ${standLabel(st.properties)} · ` : "") + `±${Math.round(accuracy)} m`;
-    trackPoint(lat, lon, accuracy, pos.timestamp); updateNav();
+    trackPoint(lat, lon, accuracy, pos.timestamp); remindStand(lat, lon, accuracy); updateNav();
   }, err => toast("GPS er ikke tilgængelig" + (err.message ? ": " + err.message : "")), { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
 }
 function inRing(x, y, ring) {
@@ -476,6 +479,7 @@ function openSheet(html, full = false) { sheet.innerHTML = '<div class="grab"></
 function closeSheet() { sheet.classList.add("hidden"); state.selected = null; restyle(); }
 sheet.addEventListener("click", e => { if (e.target.closest(".close")) closeSheet(); });
 
+function standProps(key) { return key && state.data ? state.data.layers.skovafdelinger.features.find(f => standKey(f.properties) === key)?.properties : null; }
 function standInfo(p) { return { key: standKey(p), label: standLabel(p), afd: p.afdeling_nr, litra: p.litra, compartment_id: p.compartment_id, art: p["træart"], areal: p.areal_ha }; }
 function standArea(key) {
   return state.data.layers.skovafdelinger.features.filter(f => standKey(f.properties) === key)
@@ -501,14 +505,14 @@ function selectStand(f) {
       <button data-act="photo">📷 Foto</button>
       <button data-act="note">✎ Note</button>
     </div>
-    <button class="big" data-act="vinkel">◔ Vinkeltælling (relaskop)</button>
+    <button class="big" data-act="vinkel">◔ Relaskopmåling</button>
     <button class="big" data-act="taksation">Taksér litraet direkte (Hg, Dg, stamtal …)</button>
     <button class="big" data-act="goStand">➜ Gå til ${esc(standLabel(p))}</button>
-    ${s.spread && s.spread.n > 1 ? `<p class="muted small">Vinkeltælling: ${s.spread.n} punkter, G ${fmt(s.spread.mean, 1)} m²/ha${s.spread.se !== null ? ` ± ${fmt(s.spread.se, 0)} % (middelfejl)` : ""}${s.spread.se > 10 ? ". Tag flere punkter for et sikrere tal." : ""}</p>` : ""}
+    ${s.spread && s.spread.n > 1 ? `<p class="muted small">Relaskop: ${s.spread.n} punkter, G ${fmt(s.spread.mean, 1)} m²/ha${s.spread.se !== null ? ` ± ${fmt(s.spread.se, 0)} % (middelfejl)` : ""}${s.spread.se > 10 ? ". Tag flere punkter for et sikrere tal." : ""}</p>` : ""}
     ${s.plots || s.points || s.Hg != null || s.Dg != null ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${[s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "",
-      s.points ? `${s.points} vinkeltælling${s.points === 1 ? "" : "er"}` : "",
+      s.points ? `${s.points} relaskoppunkt${s.points === 1 ? "" : "er"}` : "",
       s.Hg != null ? `Hg ${fmt(s.Hg)} m` : "", s.Dg != null ? `Dg ${fmt(s.Dg)} cm` : "", s.N ? `${fmt(s.N, 0)} stk/ha` : "",
-      s.G ? `G ${fmt(s.G)} m²/ha` : "", s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ")}</div>` : ""}
+      s.G ? `G ${fmt(s.G)} m²/ha` : "", s.V ? `${fmt(s.V, 0)} m³/ha${s.Vinfo?.hFrom === "planen" ? " (Hg fra planen)" : ""}` : "", s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ")}</div>` : ""}
     <ul class="list">${regs.filter(r => !r.data.parent).map(regItem).join("")}</ul>`);
   hydrateThumbs();
 }
@@ -520,7 +524,7 @@ function regItem(r) {
   else if (r.type === "foto") txt = "Foto" + (r.data.note ? ": " + esc(r.data.note) : "");
   else if (r.type === "note") { const n = childPhotos(r).length; txt = (r.data.general ? "<b>Generel note</b>" + (r.data.note ? ": " : "") : "") + esc(r.data.note) + (n ? ` · 📷 ${n}` : ""); }
   else if (r.type === "taksation") txt = `Taksation: Hg ${fmt(num(r.data.hg))} · Dg ${fmt(num(r.data.dg))} · ${fmt(num(r.data.n), 0)} stk/ha`;
-  else if (r.type === "vinkel") { const s = vinkelStats(r.data); txt = `Vinkeltælling BAF ${fmt(s.baf, 0)} · ${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha` + (s.N ? ` · ${fmt(s.N, 0)} stk/ha` : ""); }
+  else if (r.type === "vinkel") { const s = vinkelStats(r.data); txt = `Relaskop ${fmt(s.baf, 0)} · ${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha` + (s.N ? ` · ${fmt(s.N, 0)} stk/ha` : ""); }
   else if (r.type === "stak" || r.type === "stok") txt = pileText(r) + (r.data.note ? ": " + esc(r.data.note) : "");
   else if (r.type === "spor") txt = `Rute ${fmtLen(r.data.length_m)} · ${Math.round(r.data.minutes || 0)} min` + (r.data.note ? ": " + esc(r.data.note) : "");
   const thumb = r.type === "foto" ? r.id : r.type === "note" ? childPhotos(r)[0]?.id : null;
@@ -535,9 +539,10 @@ function hydrateThumbs() {
   });
 }
 
+const NOT_TREE = /^(sø|søer|å|vand|vandløb|vej|eng|mose|hede|hus|mark|agerjord|krat|overdrev|slette|græs|park|vildtager|liggeplads|lysåben|udyrket|anden anvendelse|andet$|ikke |bygning|naturareal|vådområde|skovbryn|naturlig succession|naturforyngelse)/i;
 function speciesOptions(extra) {
   const set = new Set(["Rødgran", "Sitkagran", "Douglasgran", "Ædelgran", "Nobilis", "Grandis", "Skovfyr", "Lærk", "Bøg", "Eg", "Ask", "Ahorn", "Birk", "Rødel", "Andet nåletræ", "Andet løvtræ"]);
-  const notTree = /^(sø|søer|å|vand|vandløb|vej|eng|mose|hede|hus|mark|agerjord|krat|overdrev|slette|græs|park|vildtager|liggeplads|lysåben|udyrket|anden anvendelse|andet$|ikke |bygning|naturareal|vådområde|skovbryn|naturlig succession|naturforyngelse)/i;
+  const notTree = NOT_TREE;
   (state.data?.layers.skovafdelinger.features || []).forEach(f => { const a = f.properties["træart"]; if (a && !notTree.test(a)) set.add(a); });
   if (extra) set.add(extra);
   return [...set].filter(Boolean).sort((a, b) => a.localeCompare(b, "da"));
@@ -687,13 +692,88 @@ function vinkelSpread(regs) {
 function bafAdvice(reg) {
   const others = reg.stand ? state.regs.filter(r => r.type === "vinkel" && r.id !== reg.id && r.stand?.key === reg.stand.key) : [];
   if (others.length) { const b = num(others[0].data.baf) || 2;
-    return { baf: b, locked: true, why: `Samme BAF som litraets ${others.length === 1 ? "første punkt" : others.length + " andre punkter"}, så punkterne kan lægges sammen.` }; }
+    return { baf: b, locked: true, why: `Samme faktor som litraets ${others.length === 1 ? "første punkt" : others.length + " andre punkter"}, så punkterne kan lægges sammen.` }; }
   const f = reg.stand && state.data?.layers.skovafdelinger.features.find(x => standKey(x.properties) === reg.stand.key);
   const G = num(f?.properties.grundflade_m2_ha);
-  if (G) { const b = bafFor(G); return { baf: b, why: `Litraet har G ≈ ${fmt(G, 0)} m²/ha i planen, så du tæller ca. ${Math.round(G / b)} træer pr. punkt med BAF ${b}.` }; }
+  if (G) { const b = bafFor(G); return { baf: b, why: `Litraet har G ≈ ${fmt(G, 0)} m²/ha i planen, så du tæller ca. ${Math.round(G / b)} træer pr. punkt med faktor ${b}.` }; }
   return { baf: null, why: "" };
 }
-const SKOVTYPER = [["Åben skov, få og store træer", "G under ca. 15 m²/ha", 1], ["Almindelig skov", "G ca. 15–30 m²/ha", 2], ["Tæt skov, fx tæt nåleskov", "G over ca. 30 m²/ha", 4]];
+/* ------------------------------------------------------------------ vedmasse: SkovPlans stammekurve (stem_taper.py, CLAUDE-708)
+   Merriman, Brownell, Meilby, Riis-Nielsen, Mason & Nord-Larsen: Multi-species stem taper and volume model, 41 species groups
+   (SSRN 7242941), Kozak (2004) model 02. Formtal F = v / (π/4·D²·H); vedmasse = G × Hg × F, som i SkovPlan. */
+const TAPER_FIX = { a0: 1.1018, a1: 1.0210, a2: 0.0462, b1: 0.3306, b2: -0.5190, b3: 0.5479, b4: 0.1430, b5: 0.2113, b6: -0.6422 };
+const TAPER_SP = {
+  "Abies alba": [-0.1835, 0.0201, -0.1154, -0.0103, -0.1990, 0.0173], "Abies balsamea": [-0.0473, 0.0001, -0.0724, -0.0461, 0.1973, 0.0228],
+  "Abies grandis": [-0.0875, 0.0499, 0.0124, 0.0058, -0.1683, 0.0052], "Abies nordmanniana": [-0.2087, 0.0294, -0.1950, 0.0330, -0.3148, 0.0177],
+  "Abies procera": [-0.0175, -0.1534, 0.0840, -0.1949, 0.5085, 0.3578], "Acer pseudoplatanus": [-0.0378, 0.0879, -0.0088, 0.0664, -0.1789, 0.0022],
+  "Alnus glutinosa": [0.4904, -0.0290, 0.0393, 0.0074, 0.3243, 0.0010], "Alnus incana": [0.0352, 0.0329, 0.0633, 0.0032, -0.2911, 0.0010],
+  "Betula pendula/pubescens": [0.3984, 0.0513, 0.0951, 0.0721, 0.2693, 0.0010], "Carpinus betulus": [0.1144, 0.0853, -0.1737, 0.2646, -0.7634, 0.0048],
+  "Chamaecyparis lawsoniana": [-0.1258, 0.2076, -0.4473, 0.3307, -0.1148, 0.0044], "Fagus orientalis": [-0.1251, 0.2857, -0.0253, 0.3226, -0.7459, 0.0010],
+  "Fagus sylvatica": [-0.1241, 0.2002, -0.0149, 0.1793, -0.4132, 0.0014], "Fraxinus excelsior": [-0.1554, 0.1277, -0.0571, 0.1274, -0.4464, 0.0036],
+  "Larix decidua": [0.0532, -0.0052, -0.0492, -0.0204, 0.0409, 0.0066], "Larix gmelinii": [-0.0429, -0.0233, -0.0941, 0.0034, -0.1478, 0.0212],
+  "Larix kaempferi": [-0.1328, -0.0176, -0.0777, -0.0214, -0.2638, 0.0279], "Larix x marschlinsii": [-0.2756, -0.0874, 0.1986, -0.1932, 0.5034, 0.3730],
+  "Picea abies": [-0.0270, 0.0050, -0.1295, 0.0269, -0.0380, 0.0138], "Picea glauca": [-0.2563, -0.1168, 0.0859, -0.0906, 0.4514, 0.5056],
+  "Picea omorika": [0.3786, -0.1168, -0.0356, -0.0328, 0.1298, 0.0089], "Picea sitchensis": [-0.1220, 0.0586, -0.0599, 0.0527, -0.2715, 0.0080],
+  "Pinus contorta": [0.1497, 0.0377, -0.0870, 0.0263, 0.1485, 0.0010], "Pinus mugo": [0.5025, -0.0195, -0.1727, -0.0009, 0.7157, 0.0010],
+  "Pinus nigra": [-0.4285, -0.0916, -0.0575, -0.1946, 0.5929, 0.6197], "Pinus sylvestris": [0.1781, 0.0174, -0.0173, -0.0522, 0.5541, 0.0013],
+  "Populus balsamifera": [-0.0017, 0.0746, 0.1735, -0.0350, 0.2149, 0.0011], "Populus deltoides": [-0.2290, 0.0401, 0.1075, -0.0223, -0.4181, 0.0122],
+  "Populus tremula": [-0.0589, 0.0432, 0.0273, 0.0618, -0.4570, 0.0057], "Populus trichocarpa": [-0.1980, -0.0496, 0.1956, -0.1497, 0.2150, 0.1104],
+  "Populus x berolinensis": [-0.1287, 0.0927, 0.0488, 0.0876, -0.5520, 0.0036], "Populus x canadensis": [0.7631, -0.4692, 0.2665, -0.1731, 0.5226, 0.6267],
+  "Populus x canescens": [0.1698, -0.2303, 0.2723, -0.1654, 0.3813, 0.2953], "Populus x wettsteinii": [-0.0147, 0.0572, 0.1349, -0.0068, -0.2762, 0.0010],
+  "Prunus avium": [-0.1051, -0.1043, 0.0807, -0.1531, 0.4845, 0.2238], "Pseudotsuga menziesii": [0.0297, 0.0061, 0.0124, -0.0163, -0.0421, 0.0058],
+  "Quercus robur/petraea": [-0.0659, 0.1638, -0.0805, 0.1644, -0.2812, 0.0013], "Quercus rubra": [-0.1542, 0.0295, -0.0847, 0.0455, -0.3394, 0.0153],
+  "Thuja plicata": [0.2101, -0.1260, -0.0925, -0.0058, -0.0005, 0.0403], "Tilia cordata": [0.1146, -0.1242, 0.1944, -0.1889, 0.4066, 0.1391],
+  "Tsuga heterophylla": [-0.2337, -0.0399, 0.0555, -0.1074, 0.0620, 0.1870],
+};
+const TAPER_DK = {
+  "rødgran": "Picea abies", "rgr": "Picea abies", "gran": "Picea abies", "sitkagran": "Picea sitchensis", "sgr": "Picea sitchensis",
+  "omorika": "Picea omorika", "serbisk gran": "Picea omorika", "hvidgran": "Picea glauca",
+  "douglasgran": "Pseudotsuga menziesii", "douglas": "Pseudotsuga menziesii", "dgr": "Pseudotsuga menziesii",
+  "ædelgran": "Abies alba", "almindelig ædelgran": "Abies alba", "ægr": "Abies alba", "grandis": "Abies grandis", "kæmpegran": "Abies grandis",
+  "nordmannsgran": "Abies nordmanniana", "nordmann": "Abies nordmanniana", "nobilis": "Abies procera", "nobilisgran": "Abies procera",
+  "edelgran": "Abies alba", "balsamgran": "Abies balsamea", "japansk lærk": "Larix kaempferi", "lærk": "Larix kaempferi",
+  "europæisk lærk": "Larix decidua", "hybridlærk": "Larix x marschlinsii", "dahurisk lærk": "Larix gmelinii",
+  "skovfyr": "Pinus sylvestris", "contortafyr": "Pinus contorta", "bjergfyr": "Pinus mugo", "østrigsk fyr": "Pinus nigra", "sortfyr": "Pinus nigra",
+  "thuja": "Thuja plicata", "kæmpethuja": "Thuja plicata", "tsuga": "Tsuga heterophylla", "vestamerikansk hemlock": "Tsuga heterophylla", "hemlock": "Tsuga heterophylla",
+  "cypres": "Chamaecyparis lawsoniana", "ædelcypres": "Chamaecyparis lawsoniana", "bøg": "Fagus sylvatica", "orientalsk bøg": "Fagus orientalis",
+  "eg": "Quercus robur/petraea", "stilkeg": "Quercus robur/petraea", "vintereg": "Quercus robur/petraea", "rødeg": "Quercus rubra",
+  "ask": "Fraxinus excelsior", "ahorn": "Acer pseudoplatanus", "ær": "Acer pseudoplatanus", "løn": "Acer pseudoplatanus",
+  "birk": "Betula pendula/pubescens", "vortebirk": "Betula pendula/pubescens", "dunbirk": "Betula pendula/pubescens",
+  "rødel": "Alnus glutinosa", "gråel": "Alnus incana", "avnbøg": "Carpinus betulus", "lind": "Tilia cordata",
+  "fuglekirsebær": "Prunus avium", "kirsebær": "Prunus avium", "asp": "Populus tremula", "bævreasp": "Populus tremula",
+  "hybridasp": "Populus x wettsteinii", "poppel": "Populus x canadensis", "op42": "Populus trichocarpa", "balsampoppel": "Populus balsamifera",
+};
+function taperParams(art) {
+  const k = String(art || "").normalize("NFC").toLowerCase().replace(/×/g, "x").split(/\s+/).filter(Boolean).join(" ");
+  const grp = Object.keys(TAPER_SP).find(n => n.toLowerCase() === k) || TAPER_DK[k], f = TAPER_FIX;
+  if (!grp) return [f.a0, f.a1, f.b3, f.b5, f.b6, 0.0066];
+  const u = TAPER_SP[grp]; return [f.a0 + u[0], f.a1 + u[1], f.b3 + u[2], f.b5 + u[3], f.b6 + u[4], u[5]];
+}
+function taperDiam(P, D, H, h) {
+  if (D <= 0 || H <= 1.3 || h < 0 || h >= H) return 0;
+  const [a0, a1, b3, b5, b6, p] = P, f = TAPER_FIX, z = h / H, q = 1 - Math.cbrt(z), x = q / (1 - Math.cbrt(p));
+  if (x <= 0) return 0;
+  const c = f.b1 * z ** 4 + f.b2 / Math.exp(D / H) + b3 * x ** 0.1 + f.b4 / D + b5 * H ** q + b6 * x, d = a0 * D ** a1 * H ** f.a2 * x ** c;
+  return Number.isFinite(d) && d > 0 ? d : 0;
+}
+/* Formtal for et træ med diameter D (cm) og højde H (m); 0,50 som i SkovPlan, hvis modellen giver noget urimeligt. */
+function formFactor(art, D, H) {
+  D = num(D) || 0; H = num(H) || 0; if (D <= 0 || H <= 1.3) return 0.50;
+  const P = taperParams(art), a = 0.1, n0 = Math.max(20, Math.ceil((H - a) / 0.1)), n = n0 + n0 % 2, st = (H - a) / n;
+  const area = h => (taperDiam(P, D, H, h) / 200) ** 2 * Math.PI;
+  let s = area(a) + area(H); for (let i = 1; i < n; i++) s += area(a + i * st) * (i % 2 ? 4 : 2);
+  const F = s * st / 3 / (Math.PI / 4 * (D / 100) ** 2 * H);
+  return F >= 0.30 && F <= 0.70 ? F : 0.50;
+}
+/* Vedmasse for et relaskoppunkt: målte Hg/Dg, ellers litraets tal fra planen. Returnerer null uden højde. */
+function vinkelVolume(s, standProps, artHint) {
+  const p = standProps || {}, H = s.Hg || num(p.middelhoejde_m), D = s.Dg || num(p.middeldiameter_cm);
+  if (!s.G || !H) return null;
+  const main = [...(s.byArt || [])].filter(a => a.art && a.art !== "Blandet").sort((a, b) => b.G - a.G)[0]?.art;
+  const art = main || artHint || p["træart"] || "", F = D ? formFactor(art, D, H) : 0.50;
+  return { V: s.G * H * F, F, H, hFrom: s.Hg ? "målt" : "planen", art };
+}
+const SKOVTYPER = [["Åben skov, få og store træer", "Relaskop på 1", 1], ["Almindelig skov", "Relaskop på 2", 2], ["Tæt skov, fx tæt nåleskov", "Relaskop på 4", 4]];
 /* ------------------------------------------------------------------ kamerasigte til vinkeltælling
    Kameraet virker som et nålehulskamera: et punkt i vinklen θ fra midten står f·tan θ pixels fra midten (f = brændvidde i
    skærm-pixels). Kalibrering: et A4-ark på langs (29,7 cm) i kendt afstand D fylder S pixels → f = S·D/W.
@@ -743,7 +823,7 @@ async function openSight(d, api) {
   const box = document.createElement("div"); box.id = "sight";
   box.innerHTML = `<video id="sgVid" playsinline muted autoplay></video>
     <div id="sgOver"></div>
-    <div class="sg-top"><div class="bafbig"><span>BAF</span><b>${fmt(d.baf, 0)}</b></div>
+    <div class="sg-top"><div class="bafbig"><span>Relaskop</span><b>${fmt(d.baf, 0)}</b></div>
       <div class="grow" id="sgMsg"></div><button id="sgClose" aria-label="Luk">✕</button></div>
     <div class="sg-bottom" id="sgBottom"></div>`;
   document.body.appendChild(box);
@@ -783,7 +863,7 @@ async function openSight(d, api) {
     const i = Math.min(api.art(), d.counts.length - 1), row = d.counts[i];
     $("#sgBottom").innerHTML = `
       <div class="sg-arts">${d.counts.map((r, k) => `<button data-art="${k}" class="${k === i ? "on" : ""}">${esc(r.art)} <b>${fmtCnt((num(r.ind) || 0) + 0.5 * (num(r.gr) || 0))}</b></button>`).join("")}</div>
-      <div class="sg-sum">${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha${s.cnt > 20 ? " · mange træer: overvej højere BAF" : ""}</div>
+      <div class="sg-sum">${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha${s.cnt > 20 ? " · mange træer: overvej højere faktor" : ""}</div>
       <div class="sg-btns"><button id="sgUndo">↶</button><button id="sgGr" class="vgr">Grænse<b>${fmt(num(row.gr) || 0, 0)}</b></button>
         <button id="sgIn" class="vin">Ind<b>${fmt(num(row.ind) || 0, 0)}</b></button></div>
       <div class="sg-links"><button id="sgCal" class="linklike">Kalibrér igen</button><button id="sgDone" class="linklike">Færdig</button></div>`;
@@ -822,75 +902,70 @@ async function openSight(d, api) {
 
 function vinkelForm(reg) {
   const d = reg.data, adv = bafAdvice(reg), defArt = reg.stand?.art || "";
+  const sp = reg.stand && state.data?.layers.skovafdelinger.features.find(x => standKey(x.properties) === reg.stand.key)?.properties;
   if (!d.baf) d.baf = adv.baf;
   d.counts = d.counts?.length ? d.counts : [{ art: defArt || "Blandet", ind: 0, gr: 0 }];
   d.trees = d.trees || [];
-  const hist = [];
-  const arts = ["Blandet", ...speciesOptions(defArt)];
+  const hist = [], arts = ["Blandet", ...speciesOptions(defArt)];
+  let cur = 0, showBaf = false, showHelp = false;
   openSheet(`
-    <div class="head"><h3>Vinkeltælling · ${esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
-    <div id="vBaf"></div>
-    <div id="vBody"></div>`, true);
-  const drawBaf = () => {
+    <div class="head"><h3>Relaskop · ${esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
+    <div id="vTop"></div><div id="vBody"></div>`, true);
+  /* Øverst: kun den faktor, relaskopet skal stå på. Valg og forklaring ligger bag «skift» og «?». */
+  const drawTop = () => {
     if (!d.baf) {
-      $("#vBaf").innerHTML = `<div class="bafask"><b>Hvor tæt er skoven, hvor du står?</b>
-        <p class="muted small">Litraet har ingen grundflade i planen, så appen kan ikke selv vælge tællefaktor (BAF).</p>
-        ${SKOVTYPER.map(([t, g, b]) => `<button class="big" data-baf="${b}"><b>${t}</b><br><span class="muted small">${g} → BAF ${b}</span></button>`).join("")}</div>`;
+      $("#vTop").innerHTML = `<div class="bafask"><b>Hvor tæt er skoven her?</b>
+        ${SKOVTYPER.map(([t, g, b]) => `<button class="big" data-baf="${b}"><b>${t}</b><br><span class="muted small">${g}</span></button>`).join("")}</div>`;
       $("#vBody").innerHTML = ""; return;
     }
-    const why = d.baf === adv.baf ? adv.why : adv.locked ? `Bemærk: litraets andre punkter er talt med BAF ${adv.baf}. Punkter med forskellig BAF kan ikke sammenlignes direkte.` : (d.bafWhy || "");
-    $("#vBaf").innerHTML = `<div class="bafbox">
-        <div class="bafbig"><span>BAF</span><b>${fmt(d.baf, 0)}</b></div>
-        <div class="grow"><b>Stil relaskopet på tællefaktor ${fmt(d.baf, 0)}.</b> Hvert træ ind = ${fmt(d.baf, 0)} m²/ha.
-          <br><span class="muted small">${esc(why)} Et træ på 30 cm tæller med ud til ${fmt(reachM(30, d.baf), 1)} m.</span>
-          <br><button id="vChange" class="linklike">${adv.locked ? "Skift BAF (ikke anbefalet)" : "Skift BAF"}</button></div></div>
-      <details class="help"><summary>Hvordan vælger jeg BAF?</summary>
-        <p><b>Kilde:</b> Vælg den faktor, der svarer til G ÷ 10, så du tæller omkring 10 træer pr. punkt. 7–12 træer pr. punkt er et godt kompromis.
-          Brug samme faktor i hele bevoksningen. Et grænsetræ tæller halvt.</p>
-        <p><b>Appens anbefaling (ikke fra kilden):</b> Appen vælger mellem 1, 2 og 4 ud fra litraets G i planen. Den advarer, hvis du tæller under 5 eller over 20 træer.
-          Uden G i planen kan du bruge skovtypen som tommelfingerregel.</p>
-        <p class="muted small">Kilder: ${BAF_SOURCES.map(([n, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(n)}</a>`).join(" · ")}</p></details>`;
-    $("#vChange").onclick = () => {
-      if (adv.locked && !confirm(`Litraets andre punkter er talt med BAF ${adv.baf}. Skifter du, kan punkterne ikke lægges direkte sammen. Skift alligevel?`)) return;
-      const b = prompt("Tællefaktor (BAF) – 1, 2 eller 4:", String(d.baf)); const v = num(b);
-      if (v && v > 0) { d.baf = v; d.bafWhy = "Valgt af dig."; drawBaf(); }
-    };
+    const why = d.baf === adv.baf ? adv.why : adv.locked ? `Litraets andre punkter er talt med faktor ${adv.baf}.` : (d.bafWhy || "");
+    $("#vTop").innerHTML = `<div class="rbar"><span>Stil relaskopet på</span><b class="rfak">${fmt(d.baf, 0)}</b>
+        <button id="vChange" class="linklike">skift</button><button id="vHelp" class="qhelp" aria-label="Forklaring">?</button></div>
+      ${showBaf ? `<div class="seg rseg">${BAFS.map(b => `<button data-baf="${b}" class="${b === d.baf ? "on" : ""}">${b}</button>`).join("")}</div>
+        ${adv.locked ? `<p class="warn small">Litraets andre punkter er talt med ${adv.baf}. Brug helst samme faktor.</p>` : ""}` : ""}
+      ${showHelp ? `<div class="help small"><p>${esc(why)} Hvert træ <b>ind</b> tæller ${fmt(d.baf, 0)} m²/ha, et <b>grænsetræ</b> det halve.</p>
+        <p>Faktoren vælges, så du tæller omkring 10 træer pr. punkt (G ÷ 10), og den samme bruges i hele litraet.</p>
+        <p class="muted">Kilder: ${BAF_SOURCES.map(([n, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(n)}</a>`).join(" · ")}</p></div>` : ""}`;
+    $("#vChange").onclick = () => { showBaf = !showBaf; drawTop(); };
+    $("#vHelp").onclick = () => { showHelp = !showHelp; drawTop(); };
     if (!$("#vBody").innerHTML) drawBody(); else result();
   };
-  $("#vBaf").onclick = e => { const b = e.target.closest("[data-baf]"); if (!b) return; d.baf = +b.dataset.baf;
-    d.bafWhy = `Valgt ud fra skovtypen (${SKOVTYPER.find(x => x[2] === d.baf)[0].toLowerCase()}).`; drawBaf(); };
+  $("#vTop").onclick = e => { const b = e.target.closest("[data-baf]"); if (!b) return;
+    const first = !d.baf; d.baf = +b.dataset.baf; showBaf = false;
+    d.bafWhy = first ? `Valgt ud fra skovtypen (${SKOVTYPER.find(x => x[2] === d.baf)[0].toLowerCase()}).` : "Valgt af dig."; drawTop(); };
   const drawBody = () => {
     $("#vBody").innerHTML = `
-      <h4>Tæl træerne rundt om dig</h4>
-      <p class="muted small">Drej en hel omgang. Er stammen bredere end sigtet, er træet <b>ind</b>. Er den lige så bred, er det et <b>grænsetræ</b> (tæller halvt).</p>
-      <button class="primary big" id="vCam" type="button">📷 Sigt med kameraet</button>
-      <div id="vRows"></div>
-      <div class="actions"><select id="vArt">${arts.map(a => `<option>${esc(a)}</option>`).join("")}</select><button id="vAddArt" type="button">+ Træart</button><button id="vUndo" type="button">↶ Fortryd</button></div>
+      <div class="rarts" id="vArts"></div>
+      <div class="rbtns"><button class="vgr" id="vGr" type="button">Grænse<b></b></button><button class="vin" id="vIn" type="button">Ind<b></b></button></div>
+      <div class="rtools"><button id="vUndo" type="button">↶ Fortryd</button><button id="vCam" type="button">📷 Sigt med kameraet</button></div>
       <div class="result" id="vRes"></div>
-      <h4>Mål 2–3 af de talte træer (valgfrit)</h4>
-      <p class="muted small">Så regner appen også stamtal, Dg og Hg ud. Tag dem jævnt rundt, ikke kun de tykkeste.</p>
-      <table class="stokke"><thead><tr><th>#</th><th>Træart</th><th>Diam. cm</th><th>Højde m</th><th></th></tr></thead><tbody id="vTrees"></tbody></table>
-      <button id="vAddTree" type="button">+ Målt træ</button>
-      <label>Note til punktet</label><textarea id="vNote">${esc(d.note || "")}</textarea>
-      <div class="stack"><button class="primary big" id="vSave">Gem vinkeltælling</button>
+      <details class="help"${d.trees.length ? " open" : ""}><summary>Mål et par træer (giver stamtal, Dg og Hg)</summary>
+        <p class="muted small">2–3 af de talte træer, jævnt rundt.</p>
+        <table class="stokke"><thead><tr><th>#</th><th>Træart</th><th>Diam. cm</th><th>Højde m</th><th></th></tr></thead><tbody id="vTrees"></tbody></table>
+        <button id="vAddTree" type="button">+ Målt træ</button></details>
+      <details class="help"${d.note ? " open" : ""}><summary>Note</summary><textarea id="vNote">${esc(d.note || "")}</textarea></details>
+      <div class="stack"><button class="primary big" id="vSave">Gem</button>
         ${reg._new ? "" : '<button class="danger" id="vDel">Slet</button>'}${!reg._new && reg.lat ? '<button id="goReg">➜ Gå hertil</button>' : ""}</div>`;
     drawRows(); drawTrees(); wire();
   };
+  /* Træarter som knapper; de store knapper tæller på den valgte. */
   const drawRows = () => {
-    $("#vRows").innerHTML = d.counts.map((r, i) => `<div class="vrow"><div class="vart">${esc(r.art)}</div>
-      <button class="vin" data-in="${i}">Ind<b>${fmt(num(r.ind) || 0, 0)}</b></button>
-      <button class="vgr" data-gr="${i}">Grænse<b>${fmt(num(r.gr) || 0, 0)}</b></button></div>`).join("");
+    cur = Math.min(cur, d.counts.length - 1);
+    $("#vArts").innerHTML = d.counts.map((r, i) => `<button data-art="${i}" class="${i === cur ? "on" : ""}">${esc(r.art)} <b>${fmtCnt((num(r.ind) || 0) + 0.5 * (num(r.gr) || 0))}</b></button>`).join("")
+      + `<select id="vArt" aria-label="Tilføj træart"><option value="">+ art</option>${arts.filter(a => !d.counts.some(r => r.art === a)).map(a => `<option>${esc(a)}</option>`).join("")}</select>`;
+    const row = d.counts[cur];
+    $("#vIn b").textContent = fmt(num(row.ind) || 0, 0); $("#vGr b").textContent = fmt(num(row.gr) || 0, 0);
     result();
   };
   const result = () => {
     if (!$("#vRes")) return;
-    const s = vinkelStats(d);
+    const s = vinkelStats(d), v = vinkelVolume(s, sp, defArt);
     let warn = "";
-    if (s.cnt > 20) { const b = BAFS.find(x => x > s.baf); warn = `Du har talt ${fmtCnt(s.cnt)} træer. ${b ? `Brug BAF ${b} på næste punkt, så går det hurtigere.` : ""}`; }
-    else if (s.cnt > 0 && s.cnt < 5 && d.done) { const b = [...BAFS].reverse().find(x => x < s.baf); warn = `Kun ${fmtCnt(s.cnt)} træer. ${b ? `BAF ${b} giver et sikrere tal.` : ""}`; }
-    $("#vRes").innerHTML = `<b>${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha</b>` +
-      (s.byArt.length > 1 ? "<br>" + s.byArt.map(a => `${esc(a.art)}: G ${fmt(a.G, 1)}`).join(" · ") : "") +
-      (s.N ? `<br>${fmt(s.N, 0)} stk/ha · Dg ${fmt(s.Dg, 1)} cm${s.Hg ? ` · Hg ${fmt(s.Hg, 1)} m` : ""} <span class="muted">(ud fra ${s.sampled} målte træer)</span>` : "") +
+    if (s.cnt > 20) { const b = BAFS.find(x => x > s.baf); warn = `${fmtCnt(s.cnt)} træer er mange. ${b ? `Brug ${b} på næste punkt.` : ""}`; }
+    else if (s.cnt > 0 && s.cnt < 5 && d.done) { const b = [...BAFS].reverse().find(x => x < s.baf); warn = `Kun ${fmtCnt(s.cnt)} træer. ${b ? `Faktor ${b} giver et sikrere tal.` : ""}`; }
+    $("#vRes").innerHTML = `<b>${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha${v ? ` · ${fmt(v.V, 0)} m³/ha` : ""}</b>` +
+      (s.N ? `<br>${fmt(s.N, 0)} stk/ha · Dg ${fmt(s.Dg, 1)} cm${s.Hg ? ` · Hg ${fmt(s.Hg, 1)} m` : ""}` : "") +
+      (v ? `<br><span class="muted small">Vedmasse = G × Hg ${fmt(v.H, 1)} m (${v.hFrom}) × formtal ${fmt(v.F, 2)}</span>` : s.G ? `<br><span class="muted small">Mål en højde for at få vedmassen.</span>` : "") +
       (warn ? `<div class="warn">${esc(warn)}</div>` : "");
   };
   const drawTrees = () => {
@@ -903,41 +978,39 @@ function vinkelForm(reg) {
   const wire = () => {
     const bump = (i, k) => { d.counts[i][k] = (num(d.counts[i][k]) || 0) + 1; hist.push([i, k]); if (navigator.vibrate) navigator.vibrate(25); drawRows(); };
     const undo = () => { const h = hist.pop(); if (!h) return toast("Intet at fortryde"); d.counts[h[0]][h[1]] = Math.max(0, (num(d.counts[h[0]][h[1]]) || 0) - 1); drawRows(); };
-    $("#vRows").onclick = e => {
-      const b = e.target.closest("[data-in],[data-gr]"); if (!b) return;
-      bump(+(b.dataset.in ?? b.dataset.gr), b.dataset.in !== undefined ? "ind" : "gr");
-    };
+    $("#vIn").onclick = () => bump(cur, "ind");
+    $("#vGr").onclick = () => bump(cur, "gr");
     $("#vUndo").onclick = undo;
-    let artIdx = 0;
+    $("#vArts").onclick = e => { const b = e.target.closest("[data-art]"); if (b) { cur = +b.dataset.art; drawRows(); } };
+    $("#vArts").onchange = e => { if (e.target.id !== "vArt" || !e.target.value) return; const a = e.target.value;
+      if (d.counts.length === 1 && d.counts[0].art === "Blandet" && !num(d.counts[0].ind) && !num(d.counts[0].gr)) d.counts = [];
+      d.counts.push({ art: a, ind: 0, gr: 0 }); cur = d.counts.length - 1; drawRows(); };
     $("#vCam").onclick = () => {
       if (!navigator.mediaDevices?.getUserMedia) return toast("Telefonens browser giver ikke adgang til kameraet her");
-      openSight(d, { bump, undo, art: v => { if (v !== undefined) artIdx = v; return artIdx; }, done: () => drawRows() });
+      openSight(d, { bump, undo, art: v => { if (v !== undefined) cur = v; return cur; }, done: () => drawRows() });
     };
-    $("#vAddArt").onclick = () => { const a = $("#vArt").value; if (d.counts.some(r => r.art === a)) return toast(a + " er allerede med");
-      if (d.counts.length === 1 && d.counts[0].art === "Blandet" && !num(d.counts[0].ind) && !num(d.counts[0].gr)) d.counts = [];
-      d.counts.push({ art: a, ind: 0, gr: 0 }); drawRows(); };
     $("#vTrees").oninput = $("#vTrees").onchange = e => { const x = e.target; if (x.dataset.k) { d.trees[+x.dataset.i][x.dataset.k] = x.value.trim(); result(); } };
     $("#vTrees").onclick = e => { const b = e.target.closest("[data-rm]"); if (!b) return; d.trees.splice(+b.dataset.rm, 1); drawTrees(); result(); };
-    $("#vAddTree").onclick = () => { d.trees.push({ art: d.counts[0]?.art || defArt, d: "", h: "" }); drawTrees();
+    $("#vAddTree").onclick = () => { d.trees.push({ art: d.counts[cur]?.art || defArt, d: "", h: "" }); drawTrees();
       $(`#vTrees input[data-i="${d.trees.length - 1}"][data-k="d"]`).focus(); };
     $("#vSave").onclick = async () => {
       const s = vinkelStats(d);
       if (!s.cnt) return toast("Tryk «Ind» for hvert træ, der tæller med");
       d.done = true;
-      if (s.cnt < 5 && !confirm(`Du har kun talt ${fmtCnt(s.cnt)} træer. ${s.baf > 1 ? "En lavere BAF giver et sikrere tal. " : ""}Gem alligevel?`)) { result(); return; }
+      if (s.cnt < 5 && !confirm(`Du har kun talt ${fmtCnt(s.cnt)} træer. ${s.baf > 1 ? "En lavere faktor giver et sikrere tal. " : ""}Gem alligevel?`)) { result(); return; }
       d.counts = d.counts.filter(r => num(r.ind) || num(r.gr));
       d.trees = d.trees.filter(t => num(t.d)).map(t => ({ art: t.art, d: num(t.d), h: num(t.h) }));
       d.note = $("#vNote").value.trim(); delete d.done;
       if (!reg.lat && state.me) Object.assign(reg, pos());
       await saveReg(reg);
-      const sp = vinkelSpread(state.regs.filter(r => r.stand?.key === reg.stand?.key));
-      toast(`Gemt: G ${fmt(s.G, 1)} m²/ha` + (sp && sp.n > 1 ? ` · litraet: ${sp.n} punkter, G ${fmt(sp.mean, 1)}${sp.se !== null ? ` ± ${fmt(sp.se, 0)} %` : ""}` : ""), 5000);
+      const spr = vinkelSpread(state.regs.filter(r => r.stand?.key === reg.stand?.key)), v = vinkelVolume(vinkelStats(d), sp, defArt);
+      toast(`Gemt: G ${fmt(s.G, 1)} m²/ha${v ? ` · ${fmt(v.V, 0)} m³/ha` : ""}` + (spr && spr.n > 1 ? ` · litraet: ${spr.n} punkter, G ${fmt(spr.mean, 1)}${spr.se !== null ? ` ± ${fmt(spr.se, 0)} %` : ""}` : ""), 5000);
       backToStand(reg);
     };
     if ($("#vDel")) $("#vDel").onclick = () => deleteReg(reg);
-    if ($("#goReg")) $("#goReg").onclick = () => { closeSheet(); goTo(reg.lat, reg.lon, "Vinkeltælling " + (reg.stand?.label || "")); };
+    if ($("#goReg")) $("#goReg").onclick = () => { closeSheet(); goTo(reg.lat, reg.lon, "Relaskop " + (reg.stand?.label || "")); };
   };
-  drawBaf();
+  drawTop();
 }
 
 /* -------- direkte taksation */
@@ -1092,7 +1165,7 @@ function listAll() {
   const regs = state.regs.filter(r => !r.data.parent).sort((a, b) => b.created.localeCompare(a.created));
   openSheet(`<div class="head"><h3>Alle registreringer (${regs.length})</h3><button class="close">Luk</button></div>
     <div class="actions"><button class="primary" data-act="newPlot">+ Prøveflade</button><button data-act="photo">📷 Foto</button><button data-act="note">✎ Note</button></div>
-    <button class="big" data-act="vinkel">◔ Vinkeltælling (relaskop)</button>
+    <button class="big" data-act="vinkel">◔ Relaskopmåling</button>
     <button class="big" data-act="generalNote">✎ Generel note (ikke knyttet til et litra)</button>
     <button class="big" data-act="pileList">Stakke og stokke (opmåling)</button>
     ${regs.length ? `<ul class="list">${regs.map(regItem).join("")}</ul>` : '<p class="muted">Ingen registreringer endnu. Tryk på et litra på kortet for at begynde.</p>'}
@@ -1323,7 +1396,8 @@ function buildGeoJSON() {
       if (r.type === "proeveflade") { const s = plotStats(r.data); Object.assign(props, { radius_m: r.data.radius, antal_traeer: s.n, stamtal_ha: Math.round(s.N),
         grundflade_m2_ha: +s.G.toFixed(2), dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
       if (r.type === "vinkel") { const s = vinkelStats(r.data); Object.assign(props, { baf: s.baf, antal_traeer: s.cnt, grundflade_m2_ha: +s.G.toFixed(2),
-        stamtal_ha: s.N ? Math.round(s.N) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), traeer_json: JSON.stringify({ counts: r.data.counts, trees: r.data.trees }) }); }
+        stamtal_ha: s.N ? Math.round(s.N) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), traeer_json: JSON.stringify({ counts: r.data.counts, trees: r.data.trees }) });
+        const v = vinkelVolume(s, standProps(r.stand?.key), r.stand?.art); if (v) props.vedmasse_m3_ha = Math.round(v.V); }
       if (r.type === "taksation") Object.assign(props, { hg_m: r.data.hg, dg_cm: r.data.dg, stamtal_ha: r.data.n, grundflade_m2_ha: r.data.g, vedmasse_m3_ha: r.data.v, bk_pct: r.data.bk, ny_traeart: r.data.art || null });
       if (r.type === "foto") props.foto = photoName(r);
       if (r.type === "stak" || r.type === "stok") {
@@ -1723,14 +1797,44 @@ function trackPoint(lat, lon, acc, t) {
   db.put("kv", tr, "spor-igang").catch(() => {});
   drawTrack();
 }
+/* Påmindelse på ruten: går du ind i et bevokset litra uden målinger i år (prøveflade, relaskop eller taksation), siger appen til
+   én gang pr. litra pr. rute. Litraet skal være det samme i to GPS-målinger i træk, så det ikke blinker ved skellet. */
+const MEASURE_TYPES = ["proeveflade", "vinkel", "taksation"];
+const isForestStand = p => !!p["træart"] && !NOT_TREE.test(p["træart"]);
+const standMeasured = key => state.regs.some(r => r.stand?.key === key && MEASURE_TYPES.includes(r.type) && String(r.created).startsWith(String(YEAR)));
+function unmeasuredStands() {
+  const keys = new Set();
+  for (const f of state.data?.layers.skovafdelinger.features || []) { const k = standKey(f.properties); if (isForestStand(f.properties) && !standMeasured(k)) keys.add(k); }
+  return keys;
+}
+function hideRemind() { $("#remind").classList.add("hidden"); }
+function remindStand(lat, lon, acc) {
+  const tr = state.track; if (!tr || !state.data || acc > 25) return;
+  const f = standAt(lon, lat), key = f ? standKey(f.properties) : null;
+  if (key !== remindStand.cand) { remindStand.cand = key; return; }
+  if (key === remindStand.last) return; remindStand.last = key;
+  if (!f || !isForestStand(f.properties) || standMeasured(key)) return hideRemind();
+  tr.reminded = tr.reminded || [];
+  if (tr.reminded.includes(key)) return; tr.reminded.push(key);
+  const left = unmeasuredStands().size;
+  $("#remindTxt").innerHTML = `<b>${esc(standLabel(f.properties))}${f.properties["træart"] ? " · " + esc(f.properties["træart"]) : ""}</b> har ingen målinger i år.`
+    + `<br><span class="small">${left === 1 ? "Det er det sidste litra uden målinger." : `${left} litraer mangler stadig.`}</span>`;
+  $("#remind").classList.remove("hidden");
+  $("#remindGo").onclick = () => { hideRemind(); selectStand(f); };
+  if (navigator.vibrate) navigator.vibrate([120, 80, 120]);
+  clearTimeout(remindStand.t); remindStand.t = setTimeout(hideRemind, 30000);
+}
+$("#remindX").onclick = hideRemind;
 async function toggleTrack() {
   if (!state.track) {
     state.track = { id: uid(), start: new Date().toISOString(), ejendom: state.data?.name || null, points: [] };
     await db.put("kv", state.track, "spor-igang"); keepAwake(true); drawTrack();
     if (state.me) trackPoint(state.me.lat, state.me.lon, state.me.accuracy, Date.now());
-    return toast("Ruten optages. Hold appen åben, så GPS'en kører.", 5000);
+    remindStand.cand = remindStand.last = undefined;
+    const left = unmeasuredStands().size;
+    return toast("Ruten optages. Hold appen åben, så GPS'en kører." + (left ? ` Appen siger til, når du går ind i et af de ${left} litraer uden målinger i år.` : ""), 6000);
   }
-  const tr = state.track; state.track = null; keepAwake(false); drawTrack(); await db.del("kv", "spor-igang");
+  const tr = state.track; state.track = null; keepAwake(false); drawTrack(); await db.del("kv", "spor-igang"); hideRemind();
   if (tr.points.length < 2) return toast("Ruten var for kort til at blive gemt");
   const len = trackLength(tr.points.map(p => [p[0], p[1]]));
   const reg = { id: tr.id, type: "spor", created: tr.start, lat: tr.points[0][0], lon: tr.points[0][1], stand: null, ejendom: tr.ejendom,
