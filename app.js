@@ -1840,6 +1840,50 @@ async function propertySheet() {
 }
 
 /* ------------------------------------------------------------------ start */
+/* ------------------------------------------------------------------ skovkortet opdaterer sig selv
+   SkovPlan lægger en lille skovkort.zip og version.json i ejendommens mappe online, når planen ændres.
+   Appen kigger efter ved start, når den kommer frem igen, når nettet kommer, og hvert 10. minut.
+   Kun skovkortet hentes automatisk (lille); et nyt ortofoto er stort, så appen siger det bare. */
+const storageBase = d => { const c = d?.pakke?.sync; return c?.rest && c?.noegle ? c.rest.replace(/\/rest\/v1\/?$/, "") + `/storage/v1/object/public/feltpakker/${c.noegle}/` : null; };
+let checkingMaps = false;
+async function checkMapUpdates() {
+  if (checkingMaps || !navigator.onLine) return; checkingMaps = true;
+  try {
+    for (const p of await propertyList()) {
+      const d = await db.get("kv", "skovkort:" + p.id), base = storageBase(d); if (!base) continue;
+      let v; try { const r = await fetch(base + "version.json?t=" + Date.now(), { cache: "no-store" }); if (!r.ok) continue; v = await r.json(); } catch (e) { continue; }
+      if (v.kort && v.kort > (d.pakke.kort_version || d.pakke.lavet || "")) {
+        if (d.id === state.data?.id && !sheet.classList.contains("hidden")) continue;   // ikke midt i en formular; næste gang
+        try { await updateMap(d, base, v.kort); } catch (e) { console.warn("skovkort", e); }
+      }
+      const o = await db.get("kv", "ortofoto:" + d.id);
+      if (v.ortho && o && (o.loaded || "") < v.ortho && safeLS("orthoNote:" + d.id) !== v.ortho) {
+        safeLS("orthoNote:" + d.id, v.ortho);
+        toast(`Der er et nyt ortofoto til ${d.name}. Hent det under ☰ › «Hent nyeste feltpakke», gerne på wifi.`, 7000);
+      }
+    }
+  } finally { checkingMaps = false; }
+}
+async function updateMap(d, base, version) {
+  const res = await fetch(base + "skovkort.zip?t=" + Date.now(), { cache: "no-store" });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const zip = await JSZip.loadAsync(await res.blob());
+  const meta = JSON.parse(await zip.file("feltpakke.json").async("string"));
+  const fl = zip.file("feltlag.json"), extra = fl ? JSON.parse(await fl.async("string")) : d.extra;
+  const file = new File([await zip.file("skovdriftsplan.gpkg").async("blob")], "skovdriftsplan.gpkg");
+  const g = await openSqlite(file);
+  let data; try { data = readGpkg(g, file); } finally { g.close(); }
+  data.pakke = { ...d.pakke, ...meta, kort_version: meta.kort_version || version }; data.extra = extra; data.id = propId(data);
+  if (data.id !== d.id) return;
+  await db.put("kv", data, "skovkort:" + data.id);
+  if (state.data?.id === data.id) {           // den viste ejendom: tegn kortet igen uden at flytte udsnittet
+    state.data = data; state.regs = regsFor(data); state.selected = null;
+    drawData(); drawRegMarkers(); restyle(); refreshMenuInfo();
+  }
+  await rememberProperty(data);
+  toast(`Skovkortet for ${data.name} er opdateret fra SkovPlan`, 4000);
+}
+
 (async function start() {
   try { await navigator.storage?.persist?.(); } catch (e) { /* ok */ }
   try {
@@ -1861,6 +1905,9 @@ async function propertySheet() {
   if (linked || customer) history.replaceState(null, "", location.pathname);
   if (customer) chooseProperty(customer); else if (linked) downloadPackage(linked);
   if (syncCfg()) { state.syncHash = safeLS("syncHash:" + syncCfg().noegle); scheduleSync(); }
+  setTimeout(checkMapUpdates, 4000); setInterval(checkMapUpdates, 10 * 60 * 1000);
+  window.addEventListener("online", () => checkMapUpdates());
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") checkMapUpdates(); });
   // Installér som app (Android/Chrome viser sin egen dialog; iPhone: Del › Føj til hjemmeskærm)
   const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
   window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); state.installPrompt = e; $("#btnInstall")?.classList.remove("hidden"); });
