@@ -171,8 +171,34 @@ function readGpkg(g, file) {
     }
     let propName = "";
     try { propName = g.exec("SELECT navn FROM ejendomsgraense WHERE navn IS NOT NULL LIMIT 1")[0]?.values[0][0] || ""; } catch (e) { /* intet */ }
-    return { layers: out, name: propName || file.name.replace(/\.gpkg$/i, ""), file: file.name, loaded: new Date().toISOString() };
+    return { layers: out, tasks: readHarvestTasks(g), name: propName || file.name.replace(/\.gpkg$/i, ""), file: file.name, loaded: new Date().toISOString() };
   }
+}
+
+/* CLAUDE-1200: planens hugstopgaver (kun hovedopgaver), så en stak kan kobles til opgaven i SkovPlan. */
+const HARVEST_RE = /tynd|afdrift|hugst|fæld|flis|skærm|udrens|udhug|stormfald|sanitet/i;
+function readHarvestTasks(g) {
+  try {
+    if (!hasTable(g, "aktiviteter")) return [];
+    const cols = g.exec('PRAGMA table_info("aktiviteter")')[0].values.map(v => v[1]);
+    const c = k => cols.includes(k) ? `a."${k}"` : "NULL";
+    const area = hasTable(g, "skovomraader") && cols.includes("area_id");
+    const res = g.exec(`SELECT ${c("activity_id")}, ${c("aktivitet")}, ${c("compartment_id")}, ${c("planlagt_aar")}, ${c("planlagt_dato")},
+      ${c("maengde_m3")}, ${c("status")}, ${c("parent_activity_id")}, ${area ? "s.afdeling" : "NULL"}
+      FROM aktiviteter a ${area ? "LEFT JOIN skovomraader s ON s.area_id = a.area_id" : ""}`)[0];
+    return (res?.values || []).filter(r => r[0] && !r[7] && (HARVEST_RE.test(r[1] || "") || (+r[5] || 0) > 0)).map(r => {
+      const year = r[3] || (r[4] ? String(r[4]).slice(0, 4) : "");
+      return { id: String(r[0]), aktivitet: r[1] || "", compartment_id: r[2] || "", year: year ? String(year) : "", m3: +r[5] || 0,
+        status: r[6] || "", litra: r[8] || "", label: [r[1], r[8]].filter(Boolean).join(" ") };
+    }).sort((a, b) => (/^afsluttet/i.test(a.status) - /^afsluttet/i.test(b.status)) || a.year.localeCompare(b.year) || a.label.localeCompare(b.label));
+  } catch (e) { console.warn("hugstopgaver", e); return []; }
+}
+const planTasks = () => state.data?.tasks || [];
+function taskForLabel(text) { const t = String(text || "").trim().toLowerCase(); return t ? planTasks().find(x => x.label.toLowerCase() === t) : null; }
+function defaultTask(reg) {
+  const cid = reg.stand?.compartment_id, open = planTasks().filter(t => !/^afsluttet/i.test(t.status));
+  const here = cid ? open.filter(t => t.compartment_id === cid) : [];
+  return here.length === 1 ? here[0] : null;
 }
 
 /* ------------------------------------------------------------------ prøveflade-beregning */
@@ -1431,13 +1457,19 @@ function pileBase(reg, extra = "") {
     <datalist id="dlSort">${[...new Set([...SORTIMENTER, ...known("sortiment")])].map(s => `<option value="${esc(s)}">`).join("")}</datalist>
     ${inp("pKunde", "Kunde (køber)", d.kunde, "dlKunde")}<datalist id="dlKunde">${known("kunde").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
     ${inp("pOrdre", "Ordre", d.ordre, "dlOrdre")}<datalist id="dlOrdre">${known("ordre").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
-    ${inp("pHugst", "Hugstopgave", d.hugst, "dlHugst")}<datalist id="dlHugst">${known("hugst").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    ${inp("pHugst", "Hugstopgave", d.hugst ?? (reg._new ? defaultTask(reg)?.label : "") ?? "", "dlHugst")}<datalist id="dlHugst">${[...planTasks().map(t => t.label), ...known("hugst")].filter((s, i, a) => a.indexOf(s) === i)
+      .map(s => { const t = taskForLabel(s); return `<option value="${esc(s)}">${t ? esc([t.year, t.m3 ? fmt(t.m3, 0) + " m³" : "", t.status].filter(Boolean).join(" · ")) : ""}</option>`; }).join("")}</datalist>
+    <div class="muted" id="pHugstInfo"></div>
     ${inp("pAfd", "Afdeling", d.afdeling ?? reg.stand?.label ?? "")}
     ${inp("pSkover", "Skover", d.skover, "dlSkover")}<datalist id="dlSkover">${known("skover").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
     ${inp("pUdk", "Udkører", d.udkoerer, "dlUdk")}<datalist id="dlUdk">${known("udkoerer").map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    <label>Afhentet (dato)</label><input id="pAfhentet" type="date" value="${esc(d.afhentet || "")}">
     <label>Bemærkning</label><textarea id="pNote">${esc(d.note || "")}</textarea>`;
 }
 function readPileBase(reg) {
+  const task = taskForLabel($("#pHugst").value);   // CLAUDE-1200
+  reg.data.hugst_id = task ? task.id : ($("#pHugst").value.trim() === (reg.data.hugst || "") ? reg.data.hugst_id || "" : "");
+  reg.data.afhentet = $("#pAfhentet").value || "";
   Object.assign(reg.data, { nr: $("#pNr").value.trim(), art: $("#pArt").value, sortiment: $("#pSort").value.trim(), kunde: $("#pKunde").value.trim(),
     ordre: $("#pOrdre").value.trim(), hugst: $("#pHugst").value.trim(), afdeling: $("#pAfd").value.trim(), skover: $("#pSkover").value.trim(),
     udkoerer: $("#pUdk").value.trim(), note: $("#pNote").value.trim() });
@@ -1448,6 +1480,10 @@ function pileFooter(reg) {
 }
 function wirePile(reg, read, check) {
   $("#pNext").onclick = () => { $("#pNr").value = nextPileNr(); };
+  const hugstInfo = () => { const t = taskForLabel($("#pHugst").value), el = $("#pHugstInfo"); if (!el) return;   // CLAUDE-1200
+    el.textContent = t ? "Opgave i planen" + (t.m3 ? ` · planlagt ${fmt(t.m3, 0)} m³` : "") + (t.year ? ` · ${t.year}` : "")
+      : $("#pHugst").value.trim() && planTasks().length ? "Ikke en opgave i planen (vælg fra listen for at koble stakken)" : ""; };
+  $("#pHugst").addEventListener("input", hugstInfo); hugstInfo();
   $("#pSave").onclick = async () => {
     readPileBase(reg); read();
     const bad = check && check(); if (bad) return toast(bad, 6000);   // CLAUDE-1162
@@ -1648,7 +1684,7 @@ function buildGeoJSON() {
       if (r.type === "stak" || r.type === "stok") {
         const d = r.data, c = r.type === "stak" ? stakCalc(d) : null, k = r.type === "stok" ? stokCalc(d) : null;
         Object.assign(props, { stak_nr: d.nr || null, sortiment: d.sortiment || null, traeart: d.art || null, koeber: d.kunde || null, ordre: d.ordre || null,
-          hugst: d.hugst || null, udkoerer: d.udkoerer || null, skover: d.skover || null, afdeling: d.afdeling || null, volumen_m3: (c ? c.fast : k.m3) != null ? +(c ? c.fast : k.m3).toFixed(2) : null,
+          hugst: d.hugst || null, hugst_id: d.hugst_id || null, afhentet: d.afhentet || null, udkoerer: d.udkoerer || null, skover: d.skover || null, afdeling: d.afdeling || null, volumen_m3: (c ? c.fast : k.m3) != null ? +(c ? c.fast : k.m3).toFixed(2) : null,
           rummeter: c?.rm != null ? +c.rm.toFixed(2) : null, flis_rm: c?.flis != null ? +c.flis.toFixed(2) : null, fastmasse_pct: c ? d.pct : null,
           stak_type: c ? STAK_TYPES[d.type] || null : null, antal_stokke: k ? k.n : null, maal_json: JSON.stringify(d) });
       }
