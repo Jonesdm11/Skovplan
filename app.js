@@ -185,9 +185,12 @@ function plotStats(p) {
     const h = num(t.h); if (h) { sgh += g * h; sgH += g; }
   }
   return {
-    ef, n, N: n * ef, G: sg * ef, Dg: sd2 ? sd3 / sd2 : null,
-    Hg: num(p.hg) ?? (sgH ? sgh / sgH : null), heights: p.trees.filter(t => num(t.h)).length,
-    _sd2: sd2 * ef, _sd3: sd3 * ef, _sgh: sgh * ef, _sgH: sgH * ef,
+    // Dg er den kvadratiske middeldiameter (G = N·π/4·Dg²), som SkovPlans modeller bruger; Dgw er den grundfladevægtede Σd³/Σd².
+    // En flade uden træer (kun Hg udfyldt) giver ikke N og G, så den trækker ikke litraets gennemsnit ned.
+    ef, n, N: n ? n * ef : null, G: n ? sg * ef : null, Dg: n ? Math.sqrt(sd2 / n) : null, Dgw: sd2 ? sd3 / sd2 : null,
+    // Målte højder går forud for et manuelt Hg ("hvis ikke målt på træer").
+    Hg: sgH ? sgh / sgH : num(p.hg), heights: p.trees.filter(t => num(t.h)).length,
+    _N: n * ef, _sd2: sd2 * ef, _sd3: sd3 * ef, _sgh: sgh * ef, _sgH: sgH * ef,
   };
 }
 function standSummary(regs) {
@@ -203,7 +206,8 @@ function standSummary(regs) {
     const mean = k => { const v = st.filter(x => x[k] !== null && Number.isFinite(x[k])); return v.length ? v.reduce((s, x) => s + x[k], 0) / v.length : null; };
     const sum = k => st.reduce((s, x) => s + x[k], 0);
     out.N = mean("N"); out.G = mean("G"); out.spread = vinkelSpread(regs);
-    out.Dg = sum("_sd2") ? sum("_sd3") / sum("_sd2") : null;
+    out.Dg = sum("_N") ? Math.sqrt(sum("_sd2") / sum("_N")) : null;
+    out.Dgw = sum("_sd2") ? sum("_sd3") / sum("_sd2") : null;
     const manual = plots.filter(p => p.type === "proeveflade").map(p => num(p.data.hg)).filter(v => v !== null);
     out.Hg = sum("_sgH") ? sum("_sgh") / sum("_sgH") : manual.length ? manual.reduce((a, b) => a + b, 0) / manual.length : null;
     const bks = plots.map(p => num(p.data.bk)).filter(v => v !== null);
@@ -600,7 +604,7 @@ function plotForm(reg) {
   const summary = () => {
     const p = { radius: +$("#pRadius").value, trees: trees.filter(meanD).map(t => ({ ...t, d: meanD(t), h: num(t.h) })), hg: $("#pHg").value };
     const s = plotStats(p), arts = perSpecies(p);
-    $("#pRes").innerHTML = `<b>${s.n} træer</b> · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha · Dg ${fmt(s.Dg)} cm · Hg ${fmt(s.Hg)} m${s.heights ? ` (${s.heights} højder)` : ""}`
+    $("#pRes").innerHTML = `<b>${s.n} træer</b> · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha · Dg ${fmt(s.Dg)} cm (grundfladevægtet ${fmt(s.Dgw)}) · Hg ${fmt(s.Hg)} m${s.heights ? ` (${s.heights} højder)` : ""}`
       + (arts.length > 1 ? "<br>" + arts.map(a => `${esc(a.art)}: ${a.n} stk, G ${fmt(a.G)}, Dg ${fmt(a.Dg)}`).join(" · ") : "");
   };
   const addRow = () => {
@@ -638,6 +642,9 @@ function plotForm(reg) {
     const badNum = v => String(v).trim() && (!num(v) || num(v) <= 0 || num(v) > 200);
     const bad = trees.find(t => badNum(t.d1) || badNum(t.d2));
     if (bad) return toast(`Træ ${trees.indexOf(bad) + 1}: diameteren skal være et tal i cm`);
+    const badH = v => String(v ?? "").trim() && (!num(v) || num(v) < 1.3 || num(v) > 60);
+    const badTree = trees.find(t => badH(t.h));
+    if (badTree) return toast(`Træ ${trees.indexOf(badTree) + 1}: højden skal være mellem 1,3 og 60 m`);
     const kept = trees.filter(meanD).map(t => ({ art: t.art, d1: num(t.d1), d2: num(t.d2), d: +meanD(t).toFixed(2), h: num(t.h), note: String(t.note || "").trim() }));
     reg.data = { radius: +$("#pRadius").value, trees: kept, hg: num($("#pHg").value), bk: num($("#pBk").value), note: $("#pNote").value.trim() };
     if (!kept.length && reg.data.hg === null) return toast("Prøvefladen er tom");
@@ -652,7 +659,7 @@ function plotForm(reg) {
 /* ------------------------------------------------------------------ vinkeltælling (relaskop, Bitterlich)
    Hvert træ «ind» = BAF m²/ha; et grænsetræ tæller halvt. G = BAF × (ind + ½ × grænse).
    Med diameter (og højde) på nogle af de talte træer: hvert prøvetræ står for (talte/målte) træer, og hvert talt træ
-   repræsenterer BAF / g træer pr. ha. Derfor N = G × gennemsnit(1/g), Dg (Σd³/Σd²) = gennemsnittet af de målte diametre
+   repræsenterer BAF / g træer pr. ha. Derfor N = G × gennemsnit(1/g), Dg (kvadratisk middeldiameter) = √(G / (N·π/4)), Dgw (Σd³/Σd²) = gennemsnittet af de målte diametre
    og Hg (grundfladevægtet) = gennemsnittet af de målte højder.
    Kilder: «To select an appropriate BAF, estimate G and divide by 10» og «a count of 7-12 trees per sample point» (ANU Fenner
    School, Forest mensuration: Angle count sampling); «Do not change prism BAF from plot to plot within a stand» (Marty,
@@ -668,7 +675,7 @@ function vinkelStats(d) {
   const cnt = rows.reduce((s, r) => s + (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0), 0), G = baf * cnt;
   const byArt = rows.map(r => ({ art: r.art, n: (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0) })).filter(r => r.n).map(r => ({ ...r, G: baf * r.n }));
   const samp = (d.trees || []).filter(t => num(t.d) > 0);
-  const out = { baf, cnt, n: cnt, G, byArt, sampled: samp.length, N: null, Dg: null, Hg: null, heights: 0, _sd2: 0, _sd3: 0, _sgh: 0, _sgH: 0 };
+  const out = { baf, cnt, n: cnt, G, byArt, sampled: samp.length, N: null, Dg: null, Dgw: null, Hg: null, heights: 0, _N: 0, _sd2: 0, _sd3: 0, _sgh: 0, _sgH: 0 };
   if (samp.length && cnt) {
     const w = cnt / samp.length;                      // talte træer pr. målt træ
     for (const t of samp) {
@@ -676,7 +683,7 @@ function vinkelStats(d) {
       out._sd2 += Ni * dd * dd; out._sd3 += Ni * dd ** 3; out.N += Ni;
       if (h) { out._sgh += Ni * g * h; out._sgH += Ni * g; out.heights++; }
     }
-    out.Dg = out._sd3 / out._sd2; out.Hg = out._sgH ? out._sgh / out._sgH : null;
+    out._N = out.N; out.Dg = Math.sqrt(out._sd2 / out.N); out.Dgw = out._sd3 / out._sd2; out.Hg = out._sgH ? out._sgh / out._sgH : null;
   }
   return out;
 }
@@ -1393,8 +1400,8 @@ function buildGeoJSON() {
       const props = { id: r.id, type: r.type, oprettet: r.created, gps_noejagtighed_m: r.accuracy ? Math.round(r.accuracy) : null,
         afd: r.stand?.afd ?? null, litra: r.stand?.litra ?? null, litra_navn: r.stand?.label ?? null, compartment_id: r.stand?.compartment_id ?? null,
         note: r.data.note || null, note_id: r.data.parent || null, generel: r.data.general ? 1 : null };
-      if (r.type === "proeveflade") { const s = plotStats(r.data); Object.assign(props, { radius_m: r.data.radius, antal_traeer: s.n, stamtal_ha: Math.round(s.N),
-        grundflade_m2_ha: +s.G.toFixed(2), dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
+      if (r.type === "proeveflade") { const s = plotStats(r.data); Object.assign(props, { radius_m: r.data.radius, antal_traeer: s.n, stamtal_ha: s.N != null ? Math.round(s.N) : null,
+        grundflade_m2_ha: s.G != null ? +s.G.toFixed(2) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
       if (r.type === "vinkel") { const s = vinkelStats(r.data); Object.assign(props, { baf: s.baf, antal_traeer: s.cnt, grundflade_m2_ha: +s.G.toFixed(2),
         stamtal_ha: s.N ? Math.round(s.N) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), traeer_json: JSON.stringify({ counts: r.data.counts, trees: r.data.trees }) });
         const v = vinkelVolume(s, standProps(r.stand?.key), r.stand?.art); if (v) props.vedmasse_m3_ha = Math.round(v.V); }
