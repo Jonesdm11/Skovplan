@@ -193,32 +193,110 @@ function plotStats(p) {
     _N: n * ef, _sd2: sd2 * ef, _sd3: sd3 * ef, _sgh: sgh * ef, _sgH: sgH * ef,
   };
 }
+/* CLAUDE-1162: litraets tal samles af enkelttræer med vægt (stk/ha pr. træ):
+   - prøveflade: hvert klupret træ vejer fladens opskaleringsfaktor / antal enheder i litraet;
+   - relaskop: artens G (BAF × talte, gennemsnit over punkterne) fordeles på artens målte træer i hele litraet
+     (forholdsestimat pr. art: w = G_art / målte_art / g). Arter uden målte træer giver kun G, ikke N og Dg.
+   Højder: Näslund-kurve h = 1,3 + (d/(a+b·d))² pr. art (ellers pr. litra) fra mindst 3 målte højder; træer uden målt
+   højde får fladens manuelle Hg eller kurvens højde, og Hg = Loreys middelhøjde Σg·h/Σg over alle træer.
+   Relaskoptal for en art er «skøn», til litraet har mindst MIN_SAMPLED målte træer af arten; skøn eksporteres ikke. */
+const MIN_SAMPLED = 8;   // CLAUDE-1162
+function naslund(pts) {   // CLAUDE-1162: lineær regression d/√(h−1,3) = a + b·d
+  const P = pts.filter(([d, h]) => d > 0 && h > 1.3);
+  if (P.length < 3) return null;
+  const xs = P.map(p => p[0]), ys = P.map(([d, h]) => d / Math.sqrt(h - 1.3)), n = P.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+  const sxx = xs.reduce((s, x) => s + (x - mx) ** 2, 0);
+  if (sxx < 1e-9) return null;
+  const b = xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0) / sxx, a = my - b * mx;
+  if (!(a > 0 && b > 0)) return null;   // kurven skal stige og flade ud; ellers bruges kun de målte højder
+  return { a, b, n, h: d => 1.3 + (d / (a + b * d)) ** 2 };
+}
+/* Hvilken talt art et målt træ hører til (relaskop): samme art, ellers den eneste talte art, ellers «Blandet». */
+const artMatcher = arts => a => arts.includes(a) ? a : arts.length === 1 ? arts[0] : arts.includes("Blandet") ? "Blandet" : null;   // CLAUDE-1162
+function litraCalc(plots, standArt) {   // CLAUDE-1162
+  const pfTrees = plots.filter(p => p.type === "proeveflade" && (p.data.trees || []).some(t => num(t.d) > 0));
+  const vk = plots.filter(p => p.type === "vinkel"), P = pfTrees.length + vk.length;
+  if (!P) return null;
+  const trees = [], gOnly = {}, Gart = {}, samp = {};
+  for (const p of pfTrees) {
+    const ef = 10000 / (Math.PI * p.data.radius ** 2), hMan = num(p.data.hg);
+    for (const t of p.data.trees) { const d = num(t.d); if (d > 0) trees.push({ art: t.art || standArt || "?", d, h: num(t.h), hMan, w: ef / P, src: "flade" }); }
+  }
+  const vstats = vk.map(p => vinkelStats(p.data));
+  vstats.forEach(s => s.byArt.forEach(a => { Gart[a.art] = (Gart[a.art] || 0) + a.G / P; }));
+  const match = artMatcher(Object.keys(Gart));
+  for (const p of vk) for (const t of p.data.trees || []) {
+    const d = num(t.d), a = d > 0 ? match(t.art) : null;
+    if (a) (samp[a] = samp[a] || []).push({ d, h: num(t.h) });
+  }
+  for (const [a, G] of Object.entries(Gart)) {
+    const S = samp[a] || [];
+    if (!S.length) { gOnly[a] = G; continue; }
+    for (const t of S) trees.push({ art: a, d: t.d, h: t.h, hMan: null, w: G / S.length / (Math.PI / 4 * (t.d / 100) ** 2), src: "relaskop" });
+  }
+  const curveAll = naslund(trees.filter(t => t.h).map(t => [t.d, t.h]));
+  const arts = [...new Set([...trees.map(t => t.art), ...Object.keys(gOnly)])], curves = {};
+  for (const a of arts) curves[a] = naslund(trees.filter(t => t.art === a && t.h).map(t => [t.d, t.h])) || curveAll;
+  for (const t of trees) { const c = curves[t.art]; t.g = Math.PI / 4 * (t.d / 100) ** 2; t.hUse = t.h || t.hMan || (c ? c.h(t.d) : null); }
+  const stats = (ts, gExtra = 0) => {
+    let N = 0, G = 0, s2 = 0, s3 = 0, gh = 0, gH = 0;
+    for (const t of ts) { N += t.w; G += t.w * t.g; s2 += t.w * t.d * t.d; s3 += t.w * t.d ** 3; if (t.hUse) { gh += t.w * t.g * t.hUse; gH += t.w * t.g; } }
+    return { N: N || null, G: G + gExtra, Dg: N ? Math.sqrt(s2 / N) : null, Dgw: s2 ? s3 / s2 : null, Hg: gH ? gh / gH : null,
+      heights: ts.filter(t => t.h).length, measured: ts.length };
+  };
+  const byArt = arts.map(a => {
+    const ts = trees.filter(t => t.art === a), s = stats(ts, gOnly[a] || 0);
+    if (gOnly[a]) Object.assign(s, { N: null, Dg: null, Dgw: null });
+    return Object.assign(s, { art: a, relaskop: a in Gart, skoen: a in Gart && ts.length < MIN_SAMPLED, curve: curves[a] && curves[a] !== curveAll ? "art" : curves[a] ? "litra" : null });
+  }).sort((x, y) => y.G - x.G);
+  const total = stats(trees, Object.values(gOnly).reduce((a, b) => a + b, 0));
+  total.complete = !Object.keys(gOnly).length;
+  if (!total.complete) Object.assign(total, { N: null, Dg: null, Dgw: null });
+  total.skoen = byArt.some(a => a.skoen);
+  return { P, trees, byArt, total, curve: curveAll, missing: Object.keys(gOnly) };
+}
 function standSummary(regs) {
   const plots = regs.filter(r => r.type === "proeveflade" || r.type === "vinkel");
   const tax = regs.filter(r => r.type === "taksation").sort((a, b) => a.created.localeCompare(b.created)).pop();
-  const out = { plots: plots.filter(p => p.type === "proeveflade").length, points: plots.filter(p => p.type === "vinkel").length };
+  const out = { plots: plots.filter(p => p.type === "proeveflade").length, points: plots.filter(p => p.type === "vinkel").length,
+    exp: {}, skoen: {} };   // CLAUDE-1162: exp = det, der går i taksationsarket (hovedarten); skoen = vises, men eksporteres ikke
+  const st0 = regs[0]?.stand, props = standProps(st0?.key);
   if (plots.length) {
-    // Vinkelpunkter uden målte træer låner de målte træer fra litraets andre vinkelpunkter (samme bevoksning).
-    const pooled = plots.filter(p => p.type === "vinkel").flatMap(p => (p.data.trees || []).filter(t => num(t.d) > 0));
-    const st = plots.map(p => p.type !== "vinkel" ? plotStats(p.data)
-      : vinkelStats((p.data.trees || []).some(t => num(t.d) > 0) ? p.data : { ...p.data, trees: pooled }));
-    // Vinkeltællinger uden målte træer giver G, men ikke stamtal: gennemsnit kun over punkter med tallet.
-    const mean = k => { const v = st.filter(x => x[k] !== null && Number.isFinite(x[k])); return v.length ? v.reduce((s, x) => s + x[k], 0) / v.length : null; };
-    const sum = k => st.reduce((s, x) => s + x[k], 0);
-    out.N = mean("N"); out.G = mean("G"); out.spread = vinkelSpread(regs);
-    out.Dg = sum("_N") ? Math.sqrt(sum("_sd2") / sum("_N")) : null;
-    out.Dgw = sum("_sd2") ? sum("_sd3") / sum("_sd2") : null;
+    out.spread = vinkelSpread(regs);
+    const lc = litraCalc(plots, st0?.art);
     const manual = plots.filter(p => p.type === "proeveflade").map(p => num(p.data.hg)).filter(v => v !== null);
-    out.Hg = sum("_sgH") ? sum("_sgh") / sum("_sgH") : manual.length ? manual.reduce((a, b) => a + b, 0) / manual.length : null;
+    const manualHg = manual.length ? manual.reduce((a, b) => a + b, 0) / manual.length : null;
+    if (lc) {
+      if (!lc.total.Hg && manualHg) { lc.total.Hg = manualHg; lc.byArt.forEach(a => { if (!a.Hg) a.Hg = manualHg; }); }
+      const v = vinkelVolume({ G: lc.total.G, Hg: lc.total.Hg, Dg: lc.total.Dg, byArt: lc.byArt }, props, st0?.art);
+      (v?.parts || []).forEach(p => { const a = lc.byArt.find(x => x.art === p.key); if (a) Object.assign(a, { V: p.V, F: p.F, hFrom: p.hFrom }); });
+      Object.assign(out, { arts: lc.byArt, total: lc.total, curve: lc.curve, missing: lc.missing, Vtotal: v?.V ?? null });
+      if (v) out.total.V = v.V;
+      const main = lc.byArt[0];   // B2: hovedarten = største grundflade
+      out.main = main.art;
+      Object.assign(out, { N: main.N, G: main.G, Dg: main.Dg, Dgw: main.Dgw, Hg: main.Hg, V: main.V ?? null,
+        Vinfo: main.V != null ? { V: main.V, F: main.F, H: main.Hg ?? lc.total.Hg ?? num(props?.middelhoejde_m), hFrom: main.hFrom, art: main.art } : null });
+      if (main.skoen) out.skoen = { N: true, Dg: true, Hg: true, V: true };
+      out.exp = { G: main.G, N: main.skoen ? null : main.N, Dg: main.skoen ? null : main.Dg, Hg: main.skoen ? null : main.Hg,
+        // B10: vedmasse med planens Hg (eller et skønnet Hg) er ikke årets måling, så cellen står tom og SkovPlan regner selv.
+        V: main.skoen || main.hFrom === "planen" ? null : main.V ?? null };
+    } else if (manualHg !== null) { out.Hg = manualHg; out.exp.Hg = manualHg; }
     const bks = plots.map(p => num(p.data.bk)).filter(v => v !== null);
-    if (bks.length) out.Bk = bks.reduce((a, b) => a + b, 0) / bks.length;
-    // Vedmasse = G × Hg × formtal (SkovPlans stammekurve); uden målt højde bruges litraets Hg fra planen.
-    const st0 = regs[0]?.stand, v = out.G ? vinkelVolume({ G: out.G, Hg: out.Hg, Dg: out.Dg }, standProps(st0?.key), st0?.art) : null;
-    if (v) { out.V = v.V; out.Vinfo = v; }
+    if (bks.length) out.Bk = out.exp.Bk = bks.reduce((a, b) => a + b, 0) / bks.length;
   }
   if (tax) {
-    const d = tax.data;
-    for (const [k, f] of [["Hg", "hg"], ["Dg", "dg"], ["N", "n"], ["G", "g"], ["V", "v"], ["Bk", "bk"]]) if (num(d[f]) !== null) out[k] = num(d[f]);
+    const d = tax.data; let changed = false;
+    for (const [k, f] of [["Hg", "hg"], ["Dg", "dg"], ["N", "n"], ["G", "g"], ["V", "v"], ["Bk", "bk"]]) if (num(d[f]) !== null) {
+      out[k] = out.exp[k] = num(d[f]); delete out.skoen[k]; if (["Hg", "Dg", "G"].includes(k)) changed = true;
+    }
+    // B12: erstatter taksationen G, Hg eller Dg uden selv at angive V, regnes V igen af de tal, der vises.
+    if (changed && num(d.v) === null) {
+      const H = out.exp.Hg ?? null, G = out.exp.G ?? null, art = d.art || out.main || st0?.art || "";
+      const F = H ? formFactor(art, out.exp.Dg ?? num(props?.middeldiameter_cm), H) : null;
+      out.V = out.exp.V = G && H ? G * H * F : null;
+      out.Vinfo = out.V ? { V: out.V, F, H, hFrom: "taksation", art } : null; delete out.skoen.V;
+    }
     if (d.art) out.art = d.art;
   }
   return out;
@@ -513,14 +591,35 @@ function selectStand(f) {
     <button class="big" data-act="taksation">Taksér litraet direkte (Hg, Dg, stamtal …)</button>
     <button class="big" data-act="goStand">➜ Gå til ${esc(standLabel(p))}</button>
     ${s.spread && s.spread.n > 1 ? `<p class="muted small">Relaskop: ${s.spread.n} punkter, G ${fmt(s.spread.mean, 1)} m²/ha${s.spread.se !== null ? ` ± ${fmt(s.spread.se, 0)} % (middelfejl)` : ""}${s.spread.se > 10 ? ". Tag flere punkter for et sikrere tal." : ""}</p>` : ""}
-    ${s.plots || s.points || s.Hg != null || s.Dg != null ? `<div class="result"><b>Feltdata ${YEAR}:</b> ${[s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "",
-      s.points ? `${s.points} relaskoppunkt${s.points === 1 ? "" : "er"}` : "",
-      s.Hg != null ? `Hg ${fmt(s.Hg)} m` : "", s.Dg != null ? `Dg ${fmt(s.Dg)} cm` : "", s.N ? `${fmt(s.N, 0)} stk/ha` : "",
-      s.G ? `G ${fmt(s.G)} m²/ha` : "", s.V ? `${fmt(s.V, 0)} m³/ha${s.Vinfo?.hFrom === "planen" ? " (Hg fra planen)" : ""}` : "", s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ")}</div>` : ""}
+    ${s.plots || s.points || s.Hg != null || s.Dg != null ? `<div class="result">${standResultHtml(s, p)}</div>` : ""}
     <ul class="list">${regs.filter(r => !r.data.parent).map(regItem).join("")}</ul>`);
   hydrateThumbs();
 }
 
+/* CLAUDE-1162: litraets feltdata. Første linje er hovedartens tal (dem, der går i taksationsarket); «skøn» eksporteres ikke. */
+function standResultHtml(s, p) {
+  const sk = k => s.skoen?.[k] ? " <i>(skøn)</i>" : "";
+  const head = [s.plots ? `${s.plots} prøveflade${s.plots === 1 ? "" : "r"}` : "", s.points ? `${s.points} relaskoppunkt${s.points === 1 ? "" : "er"}` : ""].filter(Boolean).join(" · ");
+  const main = [s.Hg != null ? `Hg ${fmt(s.Hg)} m${sk("Hg")}` : "", s.Dg != null ? `Dg ${fmt(s.Dg)} cm${sk("Dg")}` : "", s.N ? `${fmt(s.N, 0)} stk/ha${sk("N")}` : "",
+    s.G ? `G ${fmt(s.G)} m²/ha` : "", s.V ? `${fmt(s.V, 0)} m³/ha${s.Vinfo?.hFrom === "planen" ? " (Hg fra planen, eksporteres ikke)" : sk("V")}` : "",
+    s.Bk != null ? `Bk ${fmt(s.Bk, 0)} %` : ""].filter(Boolean).join(" · ");
+  const lines = [`<b>Feltdata ${YEAR}:</b> ${head}`, (s.arts?.length > 1 ? `<b>Hovedart ${esc(s.main)}</b> (går i taksationsarket): ` : "") + main];
+  if (s.arts?.length > 1) {
+    lines.push(`Alle arter: G ${fmt(s.total.G)} m²/ha${s.total.N ? ` · ${fmt(s.total.N, 0)} stk/ha · Dg ${fmt(s.total.Dg)} cm` : ""}${s.total.Hg ? ` · Hg ${fmt(s.total.Hg)} m` : ""}${s.total.V ? ` · ${fmt(s.total.V, 0)} m³/ha` : ""}`);
+    lines.push(s.arts.map(a => `${esc(a.art)}: G ${fmt(a.G)}${a.N ? `, ${fmt(a.N, 0)} stk/ha, Dg ${fmt(a.Dg)}` : ", ingen målte træer"}${a.skoen ? " (skøn)" : ""}`).join(" · "));
+  }
+  if (p?.["træart"] && s.main && s.main !== p["træart"] && !s.art)
+    lines.push(`<span class="warn">Hovedarten efter grundflade er ${esc(s.main)}, men planen siger ${esc(p["træart"])}. Ret træarten med en taksation, hvis planen er forkert.</span>`);
+  if (Object.keys(s.skoen || {}).length) lines.push(`<span class="muted small">Skøn: relaskoppets stamtal, Dg og Hg bygger på under ${MIN_SAMPLED} målte træer af arten og kommer ikke med i taksationsarket. Mål 1–2 træer på hvert punkt, så litraet får mindst 10.</span>`);
+  if (s.missing?.length) lines.push(`<span class="muted small">Ingen målte træer af ${s.missing.map(esc).join(", ")}: kun grundflade, ikke stamtal og Dg.</span>`);
+  if (s.curve) lines.push(`<span class="muted small">Hg = Loreys middelhøjde over alle træer; højder, der ikke er målt, er aflæst på en højdekurve (Näslund) fra ${s.curve.n} målte højder.</span>`);
+  if (s.V) {
+    lines.push(`<span class="muted small">${VOL_DEF}.</span>`);
+    const dff = dffStand(s.main, s.N, s.Dg, s.Hg);
+    if (dff) lines.push(`<span class="muted small">Til sammenligning (Madsen 1987, DFF 350, med grene): ${dff.total ? `totalvolumen ${fmt(dff.total, 0)} m³/ha` : ""}${dff.total && dff.derb ? ", " : ""}${dff.derb ? `til 7 cm top ${fmt(dff.derb, 0)} m³/ha` : ""}.</span>`);
+  }
+  return lines.join("<br>");
+}
 function regItem(r) {
   const when = new Date(r.created).toLocaleString("da-DK", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   let txt = "";
@@ -569,10 +668,13 @@ function plotForm(reg) {
   openSheet(`
     <div class="head"><h3>Prøveflade · ${esc(reg.stand?.label || "uden litra")}</h3><button data-act="cancelForm" class="close">Annullér</button></div>
     <div class="row">
-      <div><label>Radius (m)</label><select id="pRadius">${RADII.map(r => `<option value="${r}" ${r === d.radius ? "selected" : ""}>${fmt(r, 2)} m (${Math.round(Math.PI * r * r)} m²)</option>`).join("")}</select></div>
+      <div><label>Radius (m, vandret)</label><select id="pRadius">${RADII.map(r => `<option value="${r}" ${r === d.radius ? "selected" : ""}>${fmt(r, 2)} m (${Math.round(Math.PI * r * r)} m²)</option>`).join("")}</select></div>
       <div><label>Position</label><button id="pPos" style="width:100%">${reg.lat ? `±${Math.round(reg.accuracy || 0)} m ✓` : "Brug GPS"}</button></div>
     </div>
-    <label>Enkelttræer – krydsklup: D1, Enter, D2, Enter … (D = gennemsnit)</label>
+    <p class="muted small">Diameteren måles i 1,3 m højde. Radius måles vandret (på skrånende terræn: vandret afstand, ikke langs jorden).
+      Et kanttræ tæller med, når stammens midte i 1,3 m ligger inden for radius. Træer under klupningsgrænsen klupes ikke.</p>
+    <div class="row"><div><label>Klupningsgrænse (cm)</label><input id="pMinD" inputmode="decimal" value="${esc(d.minD ?? "")}" placeholder="fx 8"></div><div></div></div>
+    <label>Enkelttræer – krydsklup i 1,3 m: D1, Enter, D2, Enter … (D = gennemsnit)</label>
     <div class="tablewrap"><table class="trees">
       <thead><tr><th>Nr</th><th>Træart</th><th>D1 (cm)</th><th>D2 (cm)</th><th>D</th><th>H (m)</th><th>Bemærkning</th><th></th></tr></thead>
       <tbody id="pRows"></tbody>
@@ -605,7 +707,9 @@ function plotForm(reg) {
     const p = { radius: +$("#pRadius").value, trees: trees.filter(meanD).map(t => ({ ...t, d: meanD(t), h: num(t.h) })), hg: $("#pHg").value };
     const s = plotStats(p), arts = perSpecies(p);
     $("#pRes").innerHTML = `<b>${s.n} træer</b> · ${fmt(s.N, 0)} stk/ha · G ${fmt(s.G)} m²/ha · Dg ${fmt(s.Dg)} cm (grundfladevægtet ${fmt(s.Dgw)}) · Hg ${fmt(s.Hg)} m${s.heights ? ` (${s.heights} højder)` : ""}`
-      + (arts.length > 1 ? "<br>" + arts.map(a => `${esc(a.art)}: ${a.n} stk, G ${fmt(a.G)}, Dg ${fmt(a.Dg)}`).join(" · ") : "");
+      + (arts.length > 1 ? "<br>" + arts.map(a => `${esc(a.art)}: ${a.n} stk, G ${fmt(a.G)}, Dg ${fmt(a.Dg)}`).join(" · ") : "")
+      // CLAUDE-1162 (B11): fladens Hg er de målte træers; litraets Hg regnes med højdekurve over alle træer.
+      + (s.heights >= 1 ? `<br><span class="muted small">Litraets Hg regnes med en højdekurve (Näslund), når litraet har mindst 3 målte højder.</span>` : "");
   };
   const addRow = () => {
     const last = trees[trees.length - 1];
@@ -645,8 +749,10 @@ function plotForm(reg) {
     const badH = v => String(v ?? "").trim() && (!num(v) || num(v) < 1.3 || num(v) > 60);
     const badTree = trees.find(t => badH(t.h));
     if (badTree) return toast(`Træ ${trees.indexOf(badTree) + 1}: højden skal være mellem 1,3 og 60 m`);
+    const minD = num($("#pMinD").value), small = minD ? trees.find(t => meanD(t) && meanD(t) < minD) : null;   // CLAUDE-1162
+    if (small) return toast(`Træ ${trees.indexOf(small) + 1} er under klupningsgrænsen på ${fmt(minD, 0)} cm. Fjern det, eller ret grænsen.`, 4000);
     const kept = trees.filter(meanD).map(t => ({ art: t.art, d1: num(t.d1), d2: num(t.d2), d: +meanD(t).toFixed(2), h: num(t.h), note: String(t.note || "").trim() }));
-    reg.data = { radius: +$("#pRadius").value, trees: kept, hg: num($("#pHg").value), bk: num($("#pBk").value), note: $("#pNote").value.trim() };
+    reg.data = { radius: +$("#pRadius").value, trees: kept, hg: num($("#pHg").value), bk: num($("#pBk").value), minD, note: $("#pNote").value.trim() };
     if (!kept.length && reg.data.hg === null) return toast("Prøvefladen er tom");
     await saveReg(reg); toast("Prøveflade gemt"); backToStand(reg);
   };
@@ -658,7 +764,7 @@ function plotForm(reg) {
 
 /* ------------------------------------------------------------------ vinkeltælling (relaskop, Bitterlich)
    Hvert træ «ind» = BAF m²/ha; et grænsetræ tæller halvt. G = BAF × (ind + ½ × grænse).
-   Med diameter (og højde) på nogle af de talte træer: hvert prøvetræ står for (talte/målte) træer, og hvert talt træ
+   Med diameter (og højde) på nogle af de talte træer: hvert prøvetræ står for (talte/målte) træer af SAMME ART (CLAUDE-1162), og hvert talt træ
    repræsenterer BAF / g træer pr. ha. Derfor N = G × gennemsnit(1/g), Dg (kvadratisk middeldiameter) = √(G / (N·π/4)), Dgw (Σd³/Σd²) = gennemsnittet af de målte diametre
    og Hg (grundfladevægtet) = gennemsnittet af de målte højder.
    Kilder: «To select an appropriate BAF, estimate G and divide by 10» og «a count of 7-12 trees per sample point» (ANU Fenner
@@ -668,23 +774,33 @@ const BAFS = [1, 2, 4];
 const fmtCnt = n => fmt(n, n % 1 ? 1 : 0);
 const BAF_SOURCES = [["ANU Fenner School: Angle count sampling", "https://fennerschool-associated.anu.edu.au/mensuration/acs.htm"],
   ["Marty: Point Sampling, MSU Extension E-1757", "https://msaf.forest.mtu.edu/ForestInfo/MSUElibrary/E1757_PointSampling.PDF"]];
+const BAF_LIT = "Bitterlich, W. (1984): The Relascope Idea. Commonwealth Agricultural Bureaux.";   // CLAUDE-1162: original kilde
 const bafFor = G => BAFS.reduce((best, b) => Math.abs(Math.log(G / b / 10)) < Math.abs(Math.log(G / best / 10)) ? b : best, 2);
 const reachM = (dcm, baf) => dcm / 100 / (2 * Math.sqrt(baf / 10000));   // grænseafstand: et træ med diameter d tæller ud til d/(2·√(BAF/10000))
 function vinkelStats(d) {
-  const baf = num(d.baf) || 2, rows = d.counts || [];
-  const cnt = rows.reduce((s, r) => s + (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0), 0), G = baf * cnt;
-  const byArt = rows.map(r => ({ art: r.art, n: (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0) })).filter(r => r.n).map(r => ({ ...r, G: baf * r.n }));
-  const samp = (d.trees || []).filter(t => num(t.d) > 0);
-  const out = { baf, cnt, n: cnt, G, byArt, sampled: samp.length, N: null, Dg: null, Dgw: null, Hg: null, heights: 0, _N: 0, _sd2: 0, _sd3: 0, _sgh: 0, _sgH: 0 };
-  if (samp.length && cnt) {
-    const w = cnt / samp.length;                      // talte træer pr. målt træ
-    for (const t of samp) {
-      const dd = num(t.d), g = Math.PI / 4 * (dd / 100) ** 2, Ni = w * baf / g, h = num(t.h);
-      out._sd2 += Ni * dd * dd; out._sd3 += Ni * dd ** 3; out.N += Ni;
-      if (h) { out._sgh += Ni * g * h; out._sgH += Ni * g; out.heights++; }
-    }
-    out._N = out.N; out.Dg = Math.sqrt(out._sd2 / out.N); out.Dgw = out._sd3 / out._sd2; out.Hg = out._sgH ? out._sgh / out._sgH : null;
+  // CLAUDE-1162 (K3): vægten regnes pr. art, w_art = talte_art / målte_art, så et målt bøgetræ ikke giver rødgranens stamtal.
+  // Arter uden målte træer får G, men ikke N, Dg og Hg; punktets samlede N og Dg kræver målte træer af alle talte arter.
+  const baf = num(d.baf) || 2, rows = d.counts || [], by = {};
+  for (const r of rows) { const n = (num(r.ind) || 0) + 0.5 * (num(r.gr) || 0); if (!n) continue; const a = r.art || "Blandet"; (by[a] = by[a] || { art: a, n: 0 }).n += n; }
+  const arts = Object.keys(by), match = artMatcher(arts), samp = (d.trees || []).filter(t => num(t.d) > 0);
+  const cnt = arts.reduce((s, a) => s + by[a].n, 0), G = baf * cnt;
+  const out = { baf, cnt, n: cnt, G, byArt: [], sampled: samp.length, N: null, Dg: null, Dgw: null, Hg: null, heights: 0, complete: arts.length > 0 };
+  let sN = 0, s2 = 0, s3 = 0, gh = 0, gH = 0;
+  for (const a of arts) {
+    const mine = samp.filter(t => match(t.art) === a), row = { art: a, n: by[a].n, G: baf * by[a].n, sampled: mine.length, N: null, Dg: null, Dgw: null, Hg: null, heights: 0 };
+    if (mine.length) {
+      const w = by[a].n / mine.length; let n = 0, q2 = 0, q3 = 0, qh = 0, qH = 0;
+      for (const t of mine) {
+        const dd = num(t.d), g = Math.PI / 4 * (dd / 100) ** 2, Ni = w * baf / g, h = num(t.h);
+        n += Ni; q2 += Ni * dd * dd; q3 += Ni * dd ** 3; if (h) { qh += Ni * g * h; qH += Ni * g; row.heights++; }
+      }
+      Object.assign(row, { N: n, Dg: Math.sqrt(q2 / n), Dgw: q3 / q2, Hg: qH ? qh / qH : null });
+      sN += n; s2 += q2; s3 += q3; gh += qh; gH += qH; out.heights += row.heights;
+    } else out.complete = false;
+    out.byArt.push(row);
   }
+  out.byArt.sort((x, y) => y.G - x.G);
+  if (sN) { out.Dgw = s3 / s2; out.Hg = gH ? gh / gH : null; if (out.complete) { out.N = sN; out.Dg = Math.sqrt(s2 / sN); } }
   return out;
 }
 /* Spredning mellem punkterne i et litra: gennemsnit, standardafvigelse og middelfejl i %. */
@@ -697,9 +813,11 @@ function vinkelSpread(regs) {
 }
 /* Hvilken BAF og hvorfor: låst af litraets andre punkter > foreslået fra litraets G > spørg om skovtypen. */
 function bafAdvice(reg) {
-  const others = reg.stand ? state.regs.filter(r => r.type === "vinkel" && r.id !== reg.id && r.stand?.key === reg.stand.key) : [];
+  // CLAUDE-1162: faktoren låses kun til punkter fra samme år; en ny taksation et andet år må vælge en anden faktor.
+  const yr = r => String(r.created || "").slice(0, 4), year = yr(reg) || String(YEAR);
+  const others = reg.stand ? state.regs.filter(r => r.type === "vinkel" && r.id !== reg.id && r.stand?.key === reg.stand.key && yr(r) === year) : [];
   if (others.length) { const b = num(others[0].data.baf) || 2;
-    return { baf: b, locked: true, why: `Samme faktor som litraets ${others.length === 1 ? "første punkt" : others.length + " andre punkter"}, så punkterne kan lægges sammen.` }; }
+    return { baf: b, locked: true, why: `Samme faktor som litraets ${others.length === 1 ? "første punkt" : others.length + " andre punkter"} fra ${year}, så punkterne kan lægges sammen.` }; }
   const f = reg.stand && state.data?.layers.skovafdelinger.features.find(x => standKey(x.properties) === reg.stand.key);
   const G = num(f?.properties.grundflade_m2_ha);
   if (G) { const b = bafFor(G); return { baf: b, why: `Litraet har G ≈ ${fmt(G, 0)} m²/ha i planen, så du tæller ca. ${Math.round(G / b)} træer pr. punkt med faktor ${b}.` }; }
@@ -719,7 +837,7 @@ const TAPER_SP = {
   "Fagus sylvatica": [-0.1241, 0.2002, -0.0149, 0.1793, -0.4132, 0.0014], "Fraxinus excelsior": [-0.1554, 0.1277, -0.0571, 0.1274, -0.4464, 0.0036],
   "Larix decidua": [0.0532, -0.0052, -0.0492, -0.0204, 0.0409, 0.0066], "Larix gmelinii": [-0.0429, -0.0233, -0.0941, 0.0034, -0.1478, 0.0212],
   "Larix kaempferi": [-0.1328, -0.0176, -0.0777, -0.0214, -0.2638, 0.0279], "Larix x marschlinsii": [-0.2756, -0.0874, 0.1986, -0.1932, 0.5034, 0.3730],
-  "Picea abies": [-0.0270, 0.0050, -0.1295, 0.0269, -0.0380, 0.0138], "Picea glauca": [-0.2563, -0.1168, 0.0859, -0.0906, 0.4514, 0.5056],
+  "Picea abies": [-0.0270, 0.0050, -0.1295, 0.0269, -0.0380, 0.0138],   // CLAUDE-1162: Picea glauca fjernet (d(1,3) = 1,7·D, F > 0,9)
   "Picea omorika": [0.3786, -0.1168, -0.0356, -0.0328, 0.1298, 0.0089], "Picea sitchensis": [-0.1220, 0.0586, -0.0599, 0.0527, -0.2715, 0.0080],
   "Pinus contorta": [0.1497, 0.0377, -0.0870, 0.0263, 0.1485, 0.0010], "Pinus mugo": [0.5025, -0.0195, -0.1727, -0.0009, 0.7157, 0.0010],
   "Pinus nigra": [-0.4285, -0.0916, -0.0575, -0.1946, 0.5929, 0.6197], "Pinus sylvestris": [0.1781, 0.0174, -0.0173, -0.0522, 0.5541, 0.0013],
@@ -734,7 +852,7 @@ const TAPER_SP = {
 };
 const TAPER_DK = {
   "rødgran": "Picea abies", "rgr": "Picea abies", "gran": "Picea abies", "sitkagran": "Picea sitchensis", "sgr": "Picea sitchensis",
-  "omorika": "Picea omorika", "serbisk gran": "Picea omorika", "hvidgran": "Picea glauca",
+  "omorika": "Picea omorika", "serbisk gran": "Picea omorika", "hvidgran": "Picea abies", "picea glauca": "Picea abies",
   "douglasgran": "Pseudotsuga menziesii", "douglas": "Pseudotsuga menziesii", "dgr": "Pseudotsuga menziesii",
   "ædelgran": "Abies alba", "almindelig ædelgran": "Abies alba", "ægr": "Abies alba", "grandis": "Abies grandis", "kæmpegran": "Abies grandis",
   "nordmannsgran": "Abies nordmanniana", "nordmann": "Abies nordmanniana", "nobilis": "Abies procera", "nobilisgran": "Abies procera",
@@ -750,35 +868,94 @@ const TAPER_DK = {
   "fuglekirsebær": "Prunus avium", "kirsebær": "Prunus avium", "asp": "Populus tremula", "bævreasp": "Populus tremula",
   "hybridasp": "Populus x wettsteinii", "poppel": "Populus x canadensis", "op42": "Populus trichocarpa", "balsampoppel": "Populus balsamifera",
 };
-function taperParams(art) {
+/* CLAUDE-1162 (B3): arter uden egen gruppe («Andet nåletræ», «Andet løvtræ», «Blandet», ukendte navne) bruger rødgran
+   (nåletræ) eller bøg (løvtræ) i stedet for populationsgennemsnittet, der gav formtal 15–25 % under begge. */
+const CONIFER_WORDS = ["nål", "gran", "fyr", "lærk", "cypres", "thuja", "hemlock", "tsuga", "douglas", "nobilis", "taks", "ceder"];
+function taperGroup(art) {
   const k = String(art || "").normalize("NFC").toLowerCase().replace(/×/g, "x").split(/\s+/).filter(Boolean).join(" ");
-  const grp = Object.keys(TAPER_SP).find(n => n.toLowerCase() === k) || TAPER_DK[k], f = TAPER_FIX;
-  if (!grp) return [f.a0, f.a1, f.b3, f.b5, f.b6, 0.0066];
-  const u = TAPER_SP[grp]; return [f.a0 + u[0], f.a1 + u[1], f.b3 + u[2], f.b5 + u[3], f.b6 + u[4], u[5]];
+  return Object.keys(TAPER_SP).find(n => n.toLowerCase() === k) || TAPER_DK[k]
+    || (CONIFER_WORDS.some(w => k.includes(w)) ? "Picea abies" : "Fagus sylvatica");
 }
-function taperDiam(P, D, H, h) {
+function taperParams(art) {
+  const f = TAPER_FIX, u = TAPER_SP[taperGroup(art)];
+  return [f.a0 + u[0], f.a1 + u[1], f.b3 + u[2], f.b5 + u[3], f.b6 + u[4], u[5]];
+}
+function taperRaw(P, D, H, h) {
   if (D <= 0 || H <= 1.3 || h < 0 || h >= H) return 0;
   const [a0, a1, b3, b5, b6, p] = P, f = TAPER_FIX, z = h / H, q = 1 - Math.cbrt(z), x = q / (1 - Math.cbrt(p));
   if (x <= 0) return 0;
   const c = f.b1 * z ** 4 + f.b2 / Math.exp(D / H) + b3 * x ** 0.1 + f.b4 / D + b5 * H ** q + b6 * x, d = a0 * D ** a1 * H ** f.a2 * x ** c;
   return Number.isFinite(d) && d > 0 ? d : 0;
 }
-/* Formtal for et træ med diameter D (cm) og højde H (m); 0,50 som i SkovPlan, hvis modellen giver noget urimeligt. */
+/* CLAUDE-1162 (B3): kontrol af, at kurven går gennem D i 1,3 m. Ligger d(1,3)/D uden for 0,95–1,05, skaleres hele
+   profilen, så forholdet lander på grænsen (kontinuert; inden for ±5 % røres modellen ikke). Samme regel i stem_taper.py. */
+const DBH_TOL = 0.05;
+function taperScale(P, D, H) {
+  const r = taperRaw(P, D, H, 1.3) / D;
+  return r > 0 ? Math.min(Math.max(r, 1 - DBH_TOL), 1 + DBH_TOL) / r : 1;
+}
+function taperDiam(P, D, H, h, k) { return taperRaw(P, D, H, h) * (k ?? taperScale(P, D, H)); }
+/* Formtal for et træ med diameter D (cm) og højde H (m): skaftmasse m. bark fra 10 cm stub til top, uden grene,
+   divideret med π/4·D²·H. CLAUDE-1162: klemmes ind i [0,30; 0,70] i stedet for at springe til 0,50. */
+const F_MIN = 0.30, F_MAX = 0.70;
 function formFactor(art, D, H) {
   D = num(D) || 0; H = num(H) || 0; if (D <= 0 || H <= 1.3) return 0.50;
-  const P = taperParams(art), a = 0.1, n0 = Math.max(20, Math.ceil((H - a) / 0.1)), n = n0 + n0 % 2, st = (H - a) / n;
-  const area = h => (taperDiam(P, D, H, h) / 200) ** 2 * Math.PI;
+  const P = taperParams(art), k = taperScale(P, D, H), a = 0.1, n0 = Math.max(20, Math.ceil((H - a) / 0.1)), n = n0 + n0 % 2, st = (H - a) / n;
+  const area = h => (taperDiam(P, D, H, h, k) / 200) ** 2 * Math.PI;
   let s = area(a) + area(H); for (let i = 1; i < n; i++) s += area(a + i * st) * (i % 2 ? 4 : 2);
   const F = s * st / 3 / (Math.PI / 4 * (D / 100) ** 2 * H);
-  return F >= 0.30 && F <= 0.70 ? F : 0.50;
+  return Number.isFinite(F) ? Math.min(Math.max(F, F_MIN), F_MAX) : 0.50;
 }
-/* Vedmasse for et relaskoppunkt: målte Hg/Dg, ellers litraets tal fra planen. Returnerer null uden højde. */
+const VOL_DEF = "Vedmasse = skaftmasse m. bark til top, uden grene (SkovPlans stammekurve)";   // CLAUDE-1162 (B1)
+/* Vedmasse pr. art: G_art × H × formtal(art, D, H). H = artens Hg, ellers litraets/punktets Hg, ellers planens.
+   CLAUDE-1162 (K3): formtallet regnes pr. art (før: hovedartens formtal for alle arter). «Blandet» bruger litraets art. */
 function vinkelVolume(s, standProps, artHint) {
-  const p = standProps || {}, H = s.Hg || num(p.middelhoejde_m), D = s.Dg || num(p.middeldiameter_cm);
-  if (!s.G || !H) return null;
-  const main = [...(s.byArt || [])].filter(a => a.art && a.art !== "Blandet").sort((a, b) => b.G - a.G)[0]?.art;
-  const art = main || artHint || p["træart"] || "", F = D ? formFactor(art, D, H) : 0.50;
-  return { V: s.G * H * F, F, H, hFrom: s.Hg ? "målt" : "planen", art };
+  const p = standProps || {}, Hplan = num(p.middelhoejde_m), Dplan = num(p.middeldiameter_cm);
+  const arts = s.byArt?.length ? s.byArt : [{ art: artHint || p["træart"] || "", G: s.G, Hg: s.Hg, Dg: s.Dg }];
+  let V = 0, G = 0, from = "målt";
+  const parts = [];
+  for (const a of arts) {
+    if (!a.G) continue;
+    const H = a.Hg || s.Hg || Hplan, D = a.Dg || s.Dg || Dplan || arts.find(x => x.Dg)?.Dg;   // CLAUDE-1162: ellers en målt arts Dg
+    if (!H) return null;
+    const hFrom = a.Hg ? "målt" : s.Hg ? "litraet" : "planen";
+    if (hFrom === "planen") from = "planen";
+    const art = a.art && a.art !== "Blandet" ? a.art : (artHint || p["træart"] || a.art || ""), F = D ? formFactor(art, D, H) : 0.50;
+    V += a.G * H * F; G += a.G; parts.push({ key: a.art, art, G: a.G, H, D, F, V: a.G * H * F, hFrom });
+  }
+  if (!s.G || !G) return null;
+  const main = [...parts].sort((x, y) => y.G - x.G)[0];
+  return { V, F: main.F, H: main.H, hFrom: from, art: main.art, parts };
+}
+/* CLAUDE-1162 (B1): Madsen (1987), DFF beretning 350, tabel 11–13 (bøg, eg, ask), samme koefficienter som dff350_volume.py.
+   top 0 = totalvolumen inkl. grene og bark; top 7 = volumen til 7 cm (derbholz). Kun inden for kildens højde- og Dg-domæne. */
+const DFF350 = {
+  "Bøg": [[6.0, 36.7], [0.04, 0.76], { 0: [0.467065, { 1: 2.100761, 2: 0.715347, 3: 0.235416, 5: 0.064329 }, 0.002777, 1],
+    7: [-0.825426, { 1: 2.181697, 2: 0.994047, 17: 0.957453, 18: 1.008783, 25: 0.148965 }, 0.001925, 2] }],
+  "Eg": [[3.3, 32.4], [0.02, 0.88], { 0: [-0.172852, { 1: 2.084477, 2: 0.801886, 4: 1.079690, 24: 0.280564 }, 0.003174, 1],
+    7: [-0.855221, { 1: 2.125952, 2: 0.945090, 17: 0.794239, 18: 0.991454, 24: 0.728208, 25: -0.388666 }, 0.001630, 3] }],
+  "Ask": [[4.7, 31.3], [0.03, 0.59], { 0: [-1.088694, { 1: 2.002341, 2: 1.022051, 4: 2.174706, 24: 0.697865, 25: -0.614073 }, 0.002518, 1],
+    7: [-1.515177, { 1: 1.991150, 2: 1.125761, 17: 0.558633, 18: 1.070868, 24: 0.297575 }, 0.001774, 2] }],
+};
+const DFF_ALIAS = { "bøg": "Bøg", "eg": "Eg", "stilkeg": "Eg", "vintereg": "Eg", "ask": "Ask" };
+function dffTreeVolume(art, dcm, hm, dgcm, top = 0) {
+  const spec = DFF350[DFF_ALIAS[String(art || "").trim().toLowerCase()]];
+  if (!spec || !spec[2][top]) return null;
+  const d = dcm / 100, h = hm, dg = dgcm / 100, a = top / 100;
+  if (!(d > a && dg > 0 && h > 1.3) || h < spec[0][0] || h > spec[0][1] || dg < spec[1][0] || dg > spec[1][1]) return null;
+  const x = { 1: Math.log(d), 2: Math.log(h), 3: Math.log(dg), 4: Math.log(h / (h - 1.3)), 5: Math.log(dg) ** 2, 24: dg, 25: dg * dg };
+  if (a) { x[17] = Math.log1p(((a / d) * ((h - 1.3) / h)) ** 1.5); x[18] = Math.log1p(-((a / d) ** 4) * ((h - 1.3) / h) ** 2); }
+  const [b0, terms, bias, wt] = spec[2][top];
+  const w = wt === 1 ? 1 : (1 - (a / d) ** 2) * (1 - d / 2) ** (wt - 1);
+  if (w <= 0) return null;
+  const v = Math.exp(b0 + Object.entries(terms).reduce((s, [i, c]) => s + c * x[i], 0) + bias / w);
+  return Number.isFinite(v) ? v : null;
+}
+/* Middeltræ: N × v(Dg, Hg) med Dg også som bevoksningens Dg. Returnerer {total, derb} m³/ha eller null. */
+function dffStand(art, N, Dg, Hg) {
+  if (!N || !Dg || !Hg) return null;
+  const t = dffTreeVolume(art, Dg, Hg, Dg, 0), d7 = dffTreeVolume(art, Dg, Hg, Dg, 7);
+  return t === null && d7 === null ? null : { total: t === null ? null : N * t, derb: d7 === null ? null : N * d7 };
 }
 const SKOVTYPER = [["Åben skov, få og store træer", "Relaskop på 1", 1], ["Almindelig skov", "Relaskop på 2", 2], ["Tæt skov, fx tæt nåleskov", "Relaskop på 4", 4]];
 /* ------------------------------------------------------------------ kamerasigte til vinkeltælling
@@ -850,8 +1027,8 @@ async function openSight(d, api) {
     const c = sightCal(); if (!c) return calibrate();
     const w = sightPx(d.baf, sightF(c)), s = vinkelStats(d);
     $("#sgOver").innerHTML = `<div class="sg-gap" style="width:${w.toFixed(1)}px"></div>`;
-    $("#sgMsg").innerHTML = `<b>Tryk på stammen</b> i brysthøjde, så måler appen, om den er bredere end åbningen. Du kan også selv trykke Ind eller Grænse.
-      <br><span class="small">Drej en hel omgang. Et træ på 30 cm er grænsetræ i ${fmt(reachM(30, d.baf), 1)} m afstand.</span>`;
+    $("#sgMsg").innerHTML = `<b>Tryk på stammen</b> i 1,3 m højde, så måler appen, om den er bredere end åbningen. Du kan også selv trykke Ind eller Grænse.
+      <br><span class="small">Drej en hel omgang. Et træ på 30 cm er grænsetræ i ${fmt(reachM(30, d.baf), 1)} m afstand. Kamerasigtet er en hjælp, ikke et kalibreret relaskop (ingen hældningskorrektion).</span>`;
     const ov = $("#sgOver");
     ov.onpointerdown = e => {
       const i = Math.min(api.art(), d.counts.length - 1), r = trunkWidth($("#sgVid"), e.clientX, e.clientY);
@@ -932,7 +1109,8 @@ function vinkelForm(reg) {
         ${adv.locked ? `<p class="warn small">Litraets andre punkter er talt med ${adv.baf}. Brug helst samme faktor.</p>` : ""}` : ""}
       ${showHelp ? `<div class="help small"><p>${esc(why)} Hvert træ <b>ind</b> tæller ${fmt(d.baf, 0)} m²/ha, et <b>grænsetræ</b> det halve.</p>
         <p>Faktoren vælges, så du tæller omkring 10 træer pr. punkt (G ÷ 10), og den samme bruges i hele litraet.</p>
-        <p class="muted">Kilder: ${BAF_SOURCES.map(([n, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(n)}</a>`).join(" · ")}</p></div>` : ""}`;
+        <p>Tæl i 1,3 m højde. Kamerasigtet er en hjælp, ikke et kalibreret relaskop: det har ingen hældningskorrektion, og linsen kan forvrænge. Brug et rigtigt relaskop, når tallene skal ind i planen.</p>
+        <p class="muted">Kilder: ${BAF_LIT} · ${BAF_SOURCES.map(([n, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(n)}</a>`).join(" · ")}</p></div>` : ""}`;
     $("#vChange").onclick = () => { showBaf = !showBaf; drawTop(); };
     $("#vHelp").onclick = () => { showHelp = !showHelp; drawTop(); };
     if (!$("#vBody").innerHTML) drawBody(); else result();
@@ -944,10 +1122,10 @@ function vinkelForm(reg) {
     $("#vBody").innerHTML = `
       <div class="rarts" id="vArts"></div>
       <div class="rbtns"><button class="vgr" id="vGr" type="button">Grænse<b></b></button><button class="vin" id="vIn" type="button">Ind<b></b></button></div>
-      <div class="rtools"><button id="vUndo" type="button">↶ Fortryd</button><button id="vCam" type="button">📷 Sigt med kameraet</button></div>
+      <div class="rtools"><button id="vUndo" type="button">↶ Fortryd</button><button id="vCam" type="button" title="En hjælp, ikke et kalibreret relaskop">📷 Kamerasigte (hjælp)</button></div>
       <div class="result" id="vRes"></div>
       <details class="help"${d.trees.length ? " open" : ""}><summary>Mål et par træer (giver stamtal, Dg og Hg)</summary>
-        <p class="muted small">2–3 af de talte træer, jævnt rundt.</p>
+        <p class="muted small">Mål 1–2 træer på hvert punkt, så litraet får mindst 10 (mindst ${MIN_SAMPLED} af hver art, der skal have stamtal). Mål de talte træer, ikke de pæneste, i 1,3 m.</p>
         <table class="stokke"><thead><tr><th>#</th><th>Træart</th><th>Diam. cm</th><th>Højde m</th><th></th></tr></thead><tbody id="vTrees"></tbody></table>
         <button id="vAddTree" type="button">+ Målt træ</button></details>
       <details class="help"${d.note ? " open" : ""}><summary>Note</summary><textarea id="vNote">${esc(d.note || "")}</textarea></details>
@@ -970,9 +1148,12 @@ function vinkelForm(reg) {
     let warn = "";
     if (s.cnt > 20) { const b = BAFS.find(x => x > s.baf); warn = `${fmtCnt(s.cnt)} træer er mange. ${b ? `Brug ${b} på næste punkt.` : ""}`; }
     else if (s.cnt > 0 && s.cnt < 5 && d.done) { const b = [...BAFS].reverse().find(x => x < s.baf); warn = `Kun ${fmtCnt(s.cnt)} træer. ${b ? `Faktor ${b} giver et sikrere tal.` : ""}`; }
+    // CLAUDE-1162 (K3): tal pr. art; punktets egne få målte træer er altid et skøn – litraets tal ses på litraet.
+    const multi = s.byArt.length > 1;
     $("#vRes").innerHTML = `<b>${fmtCnt(s.cnt)} træer · G ${fmt(s.G, 1)} m²/ha${v ? ` · ${fmt(v.V, 0)} m³/ha` : ""}</b>` +
-      (s.N ? `<br>${fmt(s.N, 0)} stk/ha · Dg ${fmt(s.Dg, 1)} cm${s.Hg ? ` · Hg ${fmt(s.Hg, 1)} m` : ""}` : "") +
-      (v ? `<br><span class="muted small">Vedmasse = G × Hg ${fmt(v.H, 1)} m (${v.hFrom}) × formtal ${fmt(v.F, 2)}</span>` : s.G ? `<br><span class="muted small">Mål en højde for at få vedmassen.</span>` : "") +
+      (s.N ? `<br>${fmt(s.N, 0)} stk/ha · Dg ${fmt(s.Dg, 1)} cm${s.Hg ? ` · Hg ${fmt(s.Hg, 1)} m` : ""} <i>(skøn ud fra ${s.sampled} målte træer)</i>` : "") +
+      (multi || (s.sampled && !s.N) ? "<br>" + s.byArt.map(a => `${esc(a.art)}: G ${fmt(a.G, 1)}${a.N ? `, ${fmt(a.N, 0)} stk/ha, Dg ${fmt(a.Dg, 1)}` : s.sampled ? ", ingen målte træer" : ""}`).join(" · ") : "") +
+      (v ? `<br><span class="muted small">Vedmasse = ${v.parts.length > 1 ? "Σ arter " : ""}G × Hg ${fmt(v.H, 1)} m (${v.hFrom}) × formtal ${v.parts.length > 1 ? v.parts.map(x => `${esc(x.art)} ${fmt(x.F, 2)}`).join(", ") : fmt(v.F, 2)}. ${VOL_DEF}.</span>` : s.G ? `<br><span class="muted small">Mål en højde for at få vedmassen.</span>` : "") +
       (warn ? `<div class="warn">${esc(warn)}</div>` : "");
   };
   const drawTrees = () => {
@@ -1087,6 +1268,7 @@ function noteForm(reg) {
     state.noteDraft = null;
     await saveReg(reg);
     if (isNote) {
+      if (drop.length) markGone(drop, "slettet");   // CLAUDE-1162 (K4)
       for (const id of drop) { await db.del("regs", id); dropRegs(r => r.id === id); }
       for (const c of childPhotos(reg)) if (c.data.note !== reg.data.note) { c.data.note = reg.data.note; await saveReg(c); }
       for (const x of add) await saveReg({ id: x.id, type: "foto", created: x.created, lat: reg.lat, lon: reg.lon, accuracy: reg.accuracy,
@@ -1140,9 +1322,18 @@ async function saveReg(reg) {
   for (const list of [state.regs, state.allRegs]) { const i = list.findIndex(r => r.id === reg.id); i >= 0 ? list[i] = reg : list.push(reg); }
   drawRegMarkers(); restyle(); refreshMenuInfo(); scheduleSync();
 }
+/* CLAUDE-1162 (K4): hvad der er slettet (sendes med i næste eksport) og ryddet efter eksport (må ikke regnes som slettet). */
+function tombstones() { try { const t = JSON.parse(safeLS("feltSlettet") || "null"); return t && t.slettet ? t : { slettet: {}, ryddet: {} }; } catch (e) { return { slettet: {}, ryddet: {} }; } }
+function markGone(ids, kind) {
+  const t = tombstones(), dato = new Date().toISOString();
+  for (const id of ids) { const r = state.allRegs.find(x => x.id === id); t[kind][id] = { dato, ejendom: r?.ejendom || state.data?.name || null }; }
+  safeLS("feltSlettet", JSON.stringify(t));
+}
+function deviceId() { let id = safeLS("enhedId"); if (!id) { id = "enhed-" + uid(); safeLS("enhedId", id); } return id || "ukendt"; }
 async function deleteReg(reg) {
   if (!confirm("Slet denne registrering?")) return;
   const gone = new Set([reg.id, ...childPhotos(reg).map(c => c.id)]);
+  if (!reg._new) markGone([...gone], "slettet");
   for (const id of gone) await db.del("regs", id);
   dropRegs(r => gone.has(r.id)); state.noteDraft = null;
   drawRegMarkers(); restyle(); refreshMenuInfo(); backToStand(reg); scheduleSync(true);
@@ -1181,20 +1372,40 @@ function listAll() {
 }
 
 /* ------------------------------------------------------------------ stakke og stokke
-   Stak: længde × dybde × højde = rummeter; × fastmasse-% = m³ fast; flis: × omregningsfaktor = m³ løs flis.
+   Stak: længde × dybde × højde = rummeter; × fastmasse-% = m³ fast (beregnet); flis: × flisfaktor = rm flis (løs).
    Stok: stokke målt med længde og midtdiameter (Hubers formel: π/4 · d² · L), evt. flere ens stokke pr. linje.
-   Flere mål i ét felt (fx højden målt tre steder: «2,1 2,4 2,2») giver gennemsnittet. */
+   Flere mål i ét felt (fx højden målt tre steder: «2,1 2,4 2,2») giver gennemsnittet. «+» og «/» afvises (CLAUDE-1162).
+   CLAUDE-1162 (B4): flisfaktoren er 2,6 rm flis pr. m³ fast som i SkovPlan (domain/prices.py CHIP_RM_PER_SOLID_M3).
+   CLAUDE-1162 (B6): stokke kan være målt med eller uden bark; med bark trækkes artens dobbelte barktykkelse fra. Med
+   nedrunding (handelspraksis) rundes d ned til hel cm og L ned til 0,1 m, efter at et evt. overmål er trukket fra L. */
 const STAK_TYPES = { flis: "Flis", braende: "Brænde", rundtrae: "Rundtræ" };
 const FASTMASSE = [["Grot / toppe", 20], ["Heltræ, små træer", 35], ["Energitræ, rundtræ", 55], ["Rundtræ stablet", 65], ["Brænde stablet", 65], ["Brænde løst kastet", 45]];
 const SORTIMENTER = ["Skovflis", "Heltræ", "Grot", "Energitræ", "Brænde", "Industritræ", "Gavntræ", "Kævler", "Savtømmer", "Pæle"];
-const avgNum = v => { const xs = String(v ?? "").trim().split(/[\s;+\/]+/).map(num).filter(x => x !== null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
+const CHIP_RM_PER_M3 = 2.6;   // CLAUDE-1162
+const chipFactor = () => num(state.data?.pakke?.flisfaktor) || CHIP_RM_PER_M3;   // CLAUDE-1162: feltpakken har SkovPlans tal
+const badMulti = v => /[+\/]/.test(String(v ?? ""));   // CLAUDE-1162 (B7)
+const avgNum = v => { if (badMulti(v)) return null; const xs = String(v ?? "").trim().split(/[\s;]+/).map(num).filter(x => x !== null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
+/* Forslag til barkfradrag (dobbelt barktykkelse i midten, cm). Erfaringstal, ikke en norm: ret til den aftale, der gælder med køberen. */
+const BARK_CM = { "Bøg": 1, "Avnbøg": 1, "Ahorn": 1, "Ask": 1.5, "Birk": 1.5, "Rødel": 1.5, "Eg": 2.5, "Rødgran": 1.5, "Sitkagran": 1.5,
+  "Ædelgran": 1.5, "Grandis": 1.5, "Nobilis": 1.5, "Douglasgran": 2.5, "Lærk": 2.5, "Skovfyr": 2 };
+const barkFor = art => BARK_CM[art] ?? 1.5;
+const floorTo = (x, step) => Math.floor(x / step + 1e-9) * step;
+/* Én linje stokke efter bark, overmål og nedrunding: {n, l, d} som de afregnes. */
+function stokRow(t, o) {
+  o = o || {}; const n = num(t.n) ?? 1; let L = num(t.l), dcm = num(t.d);
+  if (!L || !dcm) return null;
+  L -= (num(o.overmaal) || 0) / 100;
+  if (o.bark === "med") dcm -= num(o.barkcm) || 0;
+  if (o.nedrund) { L = +floorTo(L, 0.1).toFixed(1); dcm = Math.floor(dcm + 1e-9); }
+  return L > 0 && dcm > 0 ? { n, l: L, d: dcm } : null;
+}
 function stakCalc(d) {
   const L = avgNum(d.l), D = avgNum(d.d), H = avgNum(d.h), pct = num(d.pct), k = num(d.faktor);
   const rm = L && D && H ? L * D * H : null, fast = rm !== null && pct ? rm * pct / 100 : null;
-  return { L, D, H, rm, fast, flis: d.type === "flis" && fast !== null && k ? fast * k : null };
+  return { L, D, H, rm, fast, flis: d.type === "flis" && fast !== null && k ? fast * k : null, bad: [d.l, d.d, d.h].some(badMulti) };
 }
-const stokVol = t => { const L = num(t.l), dcm = num(t.d), n = num(t.n) ?? 1; return L && dcm ? Math.PI / 4 * (dcm / 100) ** 2 * L * n : 0; };
-function stokCalc(d) { const rows = (d.stokke || []).filter(t => num(t.l) && num(t.d)); return { n: rows.reduce((a, t) => a + (num(t.n) ?? 1), 0), m3: rows.reduce((a, t) => a + stokVol(t), 0) }; }
+const stokVol = (t, o) => { const r = stokRow(t, o); return r ? Math.PI / 4 * (r.d / 100) ** 2 * r.l * r.n : 0; };
+function stokCalc(d) { const rows = (d.stokke || []).filter(t => num(t.l) && num(t.d)); return { n: rows.reduce((a, t) => a + (num(t.n) ?? 1), 0), m3: rows.reduce((a, t) => a + stokVol(t, d), 0) }; }
 const pileM3 = r => r.type === "stak" ? stakCalc(r.data).fast : r.type === "stok" ? stokCalc(r.data).m3 : null;
 function nextPileNr() {
   const nrs = state.allRegs.filter(r => r.type === "stak" || r.type === "stok").map(r => parseInt(r.data.nr, 10)).filter(Number.isFinite);
@@ -1203,8 +1414,8 @@ function nextPileNr() {
 function pileText(r) {
   const d = r.data, what = r.type === "stak" ? "Stak" : "Stok";
   const m3 = pileM3(r), extra = r.type === "stak" ? stakCalc(d) : stokCalc(d);
-  return `<b>${what} ${esc(d.nr || "")}</b> · ${m3 ? fmt(m3, 1) + " m³" : "ikke målt"}` +
-    (r.type === "stak" && extra.flis ? ` · ${fmt(extra.flis, 1)} m³ flis` : "") + (r.type === "stok" && extra.n ? ` · ${fmt(extra.n, 0)} stk` : "") +
+  return `<b>${what} ${esc(d.nr || "")}</b> · ${m3 ? fmt(m3, 1) + " m³ fast" : "ikke målt"}` +
+    (r.type === "stak" && extra.flis ? ` · ${fmt(extra.flis, 1)} rm flis` : "") + (r.type === "stok" && extra.n ? ` · ${fmt(extra.n, 0)} stk` : "") +
     [d.sortiment, d.art].filter(Boolean).map(x => " · " + esc(x)).join("");
 }
 function pileBase(reg, extra = "") {
@@ -1235,10 +1446,11 @@ function pileFooter(reg) {
   return `<div class="stack"><button class="primary big" id="pSave">Gem</button>
     ${reg._new ? "" : '<button class="danger" id="pDel">Slet</button>'}${!reg._new && reg.lat ? '<button id="goReg">➜ Gå hertil</button>' : ""}</div>`;
 }
-function wirePile(reg, read) {
+function wirePile(reg, read, check) {
   $("#pNext").onclick = () => { $("#pNr").value = nextPileNr(); };
   $("#pSave").onclick = async () => {
     readPileBase(reg); read();
+    const bad = check && check(); if (bad) return toast(bad, 6000);   // CLAUDE-1162
     if (!reg.data.nr) return toast("Skriv et nummer (eller tryk «Næste nr.»)");
     if (!reg.lat && state.me) Object.assign(reg, pos());
     if (parseInt(reg.data.nr, 10)) safeLS("sidsteStakNr", String(Math.max(parseInt(reg.data.nr, 10), parseInt(safeLS("sidsteStakNr") || "0", 10) || 0)));
@@ -1255,11 +1467,12 @@ function stakForm(reg) {
     <div class="seg" id="sType">${Object.entries(STAK_TYPES).map(([k, v]) => `<button type="button" data-t="${k}" class="${d.type === k ? "on" : ""}">${v}</button>`).join("")}</div>`)}
     <h4>Målinger</h4>
     <div class="row3">${f("sL", "Længde (m)", d.l)}${f("sD", "Dybde (m)", d.d)}${f("sH", "Højde (m)", d.h)}</div>
-    <p class="muted small">Målt flere steder? Skriv målene med mellemrum, fx «2,1 2,4 2,2», så bruges gennemsnittet.</p>
+    <p class="muted small">Målt flere steder? Skriv målene med mellemrum, fx «2,1 2,4 2,2», så bruges gennemsnittet. «+» og «/» bruges ikke: er stakken delt i sektioner, så opret en stak pr. sektion.</p>
     <div class="row"><div><label>Fastmasse</label><select id="sPre">${FASTMASSE.map(([n, p]) => `<option value="${p}">${n} (${p} %)</option>`).join("")}<option value="">Egen</option></select></div>
       ${f("sPct", "Fastmasse (%)", d.pct)}</div>
-    <div class="row"><div><label>Rummeter</label><input id="sRm" readonly tabindex="-1"></div><div><label>Volumen (m³ fast)</label><input id="sVol" readonly tabindex="-1"></div></div>
-    <div class="row">${f("sK", "Konverteringsfaktor (flis)", d.faktor)}<div><label>Flis rummeter</label><input id="sFlis" readonly tabindex="-1"></div></div>
+    <div class="row"><div><label>Rummeter (L × D × H)</label><input id="sRm" readonly tabindex="-1"></div><div><label>m³ fast (beregnet)</label><input id="sVol" readonly tabindex="-1"></div></div>
+    <div class="row">${f("sK", "Flisfaktor (rm flis pr. m³ fast)", d.faktor)}<div><label>rm flis (løs)</label><input id="sFlis" readonly tabindex="-1"></div></div>
+    <p class="muted small">SkovPlan bruger ${fmt(chipFactor(), 1)} rm flis pr. m³ fast (${fmt(1 / chipFactor(), 2)} m³ fast pr. rm flis).</p>
     <p class="muted small" id="sRes"></p>
     ${pileFooter(reg)}`, true);
   const pre = $("#sPre"), match = FASTMASSE.find(([n, p]) => n === d.preset) || FASTMASSE.find(([, p]) => p === num(d.pct));
@@ -1270,8 +1483,9 @@ function stakForm(reg) {
     read(); const c = stakCalc(d);
     $("#sRm").value = c.rm === null ? "" : fmt(c.rm, 2); $("#sVol").value = c.fast === null ? "" : fmt(c.fast, 2);
     $("#sFlis").value = c.flis === null ? (d.type === "flis" ? "" : "– (kun flis)") : fmt(c.flis, 2);
-    $("#sRes").textContent = c.rm === null ? "Udfyld længde, dybde og højde; resten regnes ud." :
-      ([c.L, c.D, c.H].some((x, i) => x !== null && String([d.l, d.d, d.h][i]).trim().split(/[\s;+\/]+/).length > 1) ? `Gennemsnit: ${fmt(c.L, 2)} × ${fmt(c.D, 2)} × ${fmt(c.H, 2)} m` : "");
+    $("#sRes").textContent = c.bad ? "«+» og «/» bruges ikke i målene. Skriv flere mål med mellemrum (så bruges gennemsnittet), eller opret en stak pr. sektion." :
+      c.rm === null ? "Udfyld længde, dybde og højde; resten regnes ud." :
+      ([c.L, c.D, c.H].some((x, i) => x !== null && String([d.l, d.d, d.h][i]).trim().split(/[\s;]+/).length > 1) ? `Gennemsnit: ${fmt(c.L, 2)} × ${fmt(c.D, 2)} × ${fmt(c.H, 2)} m` : "");
   };
   pre.onchange = () => { if (pre.value) $("#sPct").value = pre.value; show(); };
   $("#sType").onclick = e => { const b = e.target.closest("[data-t]"); if (!b) return; d.type = b.dataset.t;
@@ -1281,15 +1495,22 @@ function stakForm(reg) {
     show(); };
   for (const id of ["sL", "sD", "sH", "sPct", "sK"]) $("#" + id).oninput = show;
   $("#sPct").addEventListener("input", () => { if (num($("#sPct").value) !== num(pre.value)) pre.selectedIndex = FASTMASSE.length; });
-  show(); wirePile(reg, read);
+  show(); wirePile(reg, read, () => stakCalc(d).bad ? "«+» og «/» bruges ikke i målene. Skriv flere mål med mellemrum, eller opret en stak pr. sektion." : null);
 }
 function stokForm(reg) {
   const d = reg.data; d.stokke = d.stokke?.length ? d.stokke : [{ n: 1, l: "", d: "" }];
+  // CLAUDE-1162 (B6): bark, barkfradrag, nedrunding og overmål. Ældre stokke uden felterne regnes som før (ingen fradrag).
+  const bTxt = v => typeof v === "number" ? String(v).replace(".", ",") : v ?? "";
   openSheet(`
     <div class="head"><h3>${reg._new ? "Ny stok" : "Stok " + esc(d.nr)}${reg.stand ? " · " + esc(reg.stand.label) : ""}</h3><button data-act="pileList" class="close">Fortryd</button></div>
     <h4>Grunddata</h4>${pileBase(reg)}
     <h4>Målinger</h4>
-    <p class="muted small">Længde og diameter på midten af stokken. Ens stokke kan stå på samme linje med et antal.</p>
+    <p class="muted small">Længde og diameter på midten af stokken (Hubers formel). Ens stokke kan stå på samme linje med et antal.</p>
+    <label>Diameteren er målt</label><div class="seg" id="kBark"><button type="button" data-b="med" class="${d.bark === "med" ? "on" : ""}">med bark</button><button type="button" data-b="uden" class="${d.bark === "uden" ? "on" : ""}">uden bark</button></div>
+    <div class="row"><div><label>Barkfradrag (cm, dobbelt bark)</label><input id="kBarkCm" inputmode="decimal" value="${esc(bTxt(d.barkcm))}"></div>
+      <div><label>Overmål på længden (cm)</label><input id="kOver" inputmode="decimal" value="${esc(bTxt(d.overmaal))}"></div></div>
+    <label class="check"><input type="checkbox" id="kRound" ${d.nedrund ? "checked" : ""}> Rund d ned til hel cm og L ned til 0,1 m (handelspraksis)</label>
+    <p class="muted small" id="kBarkInfo"></p>
     <table class="stokke"><thead><tr><th>#</th><th>Antal</th><th>Længde m</th><th>Midtdiam. cm</th><th>m³</th><th></th></tr></thead><tbody id="kRows"></tbody></table>
     <button id="kAdd" type="button">+ Stok</button>
     <div class="result" id="kRes"></div>
@@ -1302,22 +1523,34 @@ function stokForm(reg) {
       <td class="v" id="kV${i}"></td><td><button type="button" data-rm="${i}" aria-label="Fjern">×</button></td></tr>`).join("");
     sum(); if (focus !== undefined) $(`#kRows input[data-i="${focus}"][data-k="l"]`)?.focus();
   };
+  const readOpts = () => Object.assign(d, { barkcm: num($("#kBarkCm").value), overmaal: num($("#kOver").value), nedrund: $("#kRound").checked });
   const sum = () => {
-    d.stokke.forEach((t, i) => { const v = stokVol(t); $("#kV" + i).textContent = v ? fmt(v, 2) : ""; });
-    const c = stokCalc(d); $("#kRes").innerHTML = c.n ? `<b>${fmt(c.n, 0)} stokke · ${fmt(c.m3, 2)} m³</b>` : "Udfyld længde og diameter.";
+    readOpts();
+    d.stokke.forEach((t, i) => { const v = stokVol(t, d); $("#kV" + i).textContent = v ? fmt(v, 2) : ""; });
+    const c = stokCalc(d); $("#kRes").innerHTML = c.n ? `<b>${fmt(c.n, 0)} stokke · ${fmt(c.m3, 2)} m³${d.bark === "uden" || (d.bark === "med" && num(d.barkcm)) ? " uden bark" : d.bark === "med" ? " med bark" : ""}</b>` : "Udfyld længde og diameter.";
+    $("#kBarkInfo").textContent = !d.bark ? "Vælg, om diameteren er målt med eller uden bark." :
+      d.bark === "med" ? `Fra diameteren trækkes ${fmt(num(d.barkcm) || 0, 1)} cm (forslag for ${d.art || "arten"}: ${fmt(barkFor(d.art), 1)} cm; ret efter aftalen med køberen).` : "Ingen barkfradrag.";
   };
+  $("#kBark").onclick = e => { const b = e.target.closest("[data-b]"); if (!b) return; d.bark = b.dataset.b;
+    $("#kBark").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); sum(); };
+  for (const id of ["kBarkCm", "kOver"]) $("#" + id).oninput = sum;
+  $("#kRound").onchange = sum;
+  $("#pArt").addEventListener("change", () => { if (d.bark === "med" && !reg._barkEdited) { $("#kBarkCm").value = bTxt(barkFor($("#pArt").value)); d.art = $("#pArt").value; sum(); } });
+  $("#kBarkCm").addEventListener("input", () => { reg._barkEdited = true; });
   $("#kRows").oninput = e => { const x = e.target; if (x.dataset.k) { d.stokke[+x.dataset.i][x.dataset.k] = x.value.trim(); sum(); } };
   $("#kRows").onclick = e => { const b = e.target.closest("[data-rm]"); if (!b) return; d.stokke.splice(+b.dataset.rm, 1); if (!d.stokke.length) d.stokke.push({ n: 1, l: "", d: "" }); draw(); };
   $("#kAdd").onclick = () => { const last = d.stokke[d.stokke.length - 1] || {}; d.stokke.push({ n: 1, l: last.l || "", d: "" }); draw(d.stokke.length - 1); };
   draw();
-  wirePile(reg, () => { d.stokke = d.stokke.filter(t => num(t.l) || num(t.d)); });
+  wirePile(reg, () => { readOpts(); delete reg._barkEdited; d.stokke = d.stokke.filter(t => num(t.l) || num(t.d)); },
+    () => d.stokke.some(t => badMulti(t.l) || badMulti(t.d) || badMulti(t.n)) ? "«+» og «/» bruges ikke i målene. Skriv én stok pr. linje." : !d.bark ? "Vælg, om diameteren er målt med eller uden bark." : null);
 }
 function newPile(type) {
   const base = { id: uid(), _new: true, type, created: new Date().toISOString(), ...pos(), stand: currentStand() };
   const last = state.allRegs.filter(r => r.type === type).sort((a, b) => b.created.localeCompare(a.created))[0]?.data || {};
   const keep = { art: last.art || "", sortiment: last.sortiment || "", kunde: last.kunde || "", ordre: last.ordre || "", hugst: last.hugst || "", skover: last.skover || "", udkoerer: last.udkoerer || "" };
-  if (type === "stak") return stakForm({ ...base, data: { nr: nextPileNr(), type: last.type || "flis", pct: last.pct ?? 20, preset: last.preset ?? FASTMASSE[0][0], faktor: last.faktor ?? 2.8, ...keep } });
-  stokForm({ ...base, data: { nr: nextPileNr(), stokke: [], ...keep } });
+  // CLAUDE-1162 (B4): 2,6 rm flis pr. m³ fast som i SkovPlan; den gamle standard 2,8 fra appen tages ikke med videre.
+  if (type === "stak") return stakForm({ ...base, data: { nr: nextPileNr(), type: last.type || "flis", pct: last.pct ?? 20, preset: last.preset ?? FASTMASSE[0][0], faktor: last.faktor && last.faktor !== 2.8 ? last.faktor : chipFactor(), ...keep } });
+  stokForm({ ...base, data: { nr: nextPileNr(), stokke: [], bark: last.bark || "med", barkcm: last.bark ? last.barkcm : barkFor(keep.art), nedrund: last.nedrund ?? true, overmaal: last.overmaal ?? null, ...keep } });
 }
 function pileList(q) {
   state.selected = null; restyle();
@@ -1331,7 +1564,7 @@ function pileList(q) {
   openSheet(`<div class="head"><h3>Stakke og stokke</h3><button class="close">Luk</button></div>
     <div class="actions"><button class="primary" data-act="newStak">+ Stak</button><button class="primary" data-act="newStok">+ Stok</button></div>
     <div class="search"><input id="pQ" type="search" placeholder="Søg: nr., art, sortiment, køber, hugst …" value="${esc(q)}"><button id="pClr" type="button">Ryd</button></div>
-    ${all.length ? `<p class="muted">${shown.length} af ${all.length} · ${fmt(total, 1)} m³${flis ? ` · ${fmt(flis, 1)} m³ flis` : ""}</p>
+    ${all.length ? `<p class="muted">${shown.length} af ${all.length} · ${fmt(total, 1)} m³ fast${flis ? ` · ${fmt(flis, 1)} rm flis` : ""}</p>
       <ul class="list">${shown.map(regItem).join("")}</ul>` : '<p class="muted">Ingen stakke eller stokke endnu.</p>'}`, true);
   const qi = $("#pQ");
   qi.oninput = () => { clearTimeout(pileList.t); pileList.t = setTimeout(() => { const p = qi.selectionStart; pileList(qi.value); const n = $("#pQ"); n.focus(); n.setSelectionRange(p, p); }, 250); };
@@ -1352,10 +1585,12 @@ function buildTaxCsv() {
   for (const key of keys) {
     const regs = by[key], st = regs[0].stand, s = standSummary(regs);
     // Noter og fotos går ikke i litraets bemærkning; SkovPlan viser dem for sig under «Fra felten».
-    const hasMeasure = ["Hg", "Dg", "N", "G", "V", "Bk"].some(k => s[k] !== undefined && s[k] !== null) || s.art;
+    // CLAUDE-1162: kun det, der er målt for hovedarten (s.exp): skøn fra relaskop og vedmasse med planens Hg står tomme (B2, B10, K3).
+    const e = s.exp || {};
+    const hasMeasure = ["Hg", "Dg", "N", "G", "V", "Bk"].some(k => e[k] !== undefined && e[k] !== null) || s.art;
     if (!hasMeasure) continue;
     lines.push([st.afd, st.litra, csvNum(standArea(key) || st.areal, 2), st.art, "", hasMeasure ? YEAR : "",
-      csvNum(s.Hg, 1), csvNum(s.Dg, 1), csvNum(s.N, 0), csvNum(s.G, 1), csvNum(s.V, 0), csvNum(s.Bk, 0), "", s.art || "", ""].map(csvCell).join(";"));
+      csvNum(e.Hg, 1), csvNum(e.Dg, 1), csvNum(e.N, 0), csvNum(e.G, 1), csvNum(e.V, 0), csvNum(e.Bk, 0), "", s.art || "", ""].map(csvCell).join(";"));
     rows++;
   }
   return { csv: "﻿" + lines.join("\r\n") + "\r\n", rows };
@@ -1380,14 +1615,16 @@ function buildTreeCsv() {
 /* Stakke og stokke, én række pr. stak/stok – åbner direkte i Excel. */
 function buildPileCsv() {
   const head = ["Hvad", "Nr", "Dato", "Type", "Træart", "Sortiment", "Kunde", "Ordre", "Hugstopgave", "Afdeling", "Skover", "Udkører", "Afd", "Litra", "Længde (m)", "Dybde (m)", "Højde (m)",
-    "Rummeter", "Fastmasse (%)", "m³ fast", "Flis-faktor", "m³ flis", "Antal stokke", "Bemærkning", "Bredde", "Længde"];
+    "Rummeter", "Fastmasse (%)", "m³ fast", "Flisfaktor (rm/m³)", "rm flis", "Antal stokke", "Diameter målt", "Barkfradrag (cm)", "Nedrundet", "Overmål (cm)", "Bemærkning", "Bredde", "Længde"];
   const lines = [head.join(";")];
   const piles = state.regs.filter(r => r.type === "stak" || r.type === "stok").sort((a, b) => (parseInt(a.data.nr, 10) || 0) - (parseInt(b.data.nr, 10) || 0));
   for (const r of piles) {
     const d = r.data, c = r.type === "stak" ? stakCalc(d) : {}, k = r.type === "stok" ? stokCalc(d) : {};
     lines.push([r.type === "stak" ? "Stak" : "Stok", d.nr, r.created.slice(0, 10), r.type === "stak" ? STAK_TYPES[d.type] || "" : "", d.art, d.sortiment, d.kunde, d.ordre, d.hugst, d.afdeling ?? r.stand?.label ?? "", d.skover, d.udkoerer,
       r.stand?.afd ?? "", r.stand?.litra ?? "", csvNum(c.L, 2), csvNum(c.D, 2), csvNum(c.H, 2), csvNum(c.rm, 2), r.type === "stak" ? csvNum(num(d.pct), 0) : "",
-      csvNum(r.type === "stak" ? c.fast : k.m3, 2), r.type === "stak" && d.type === "flis" ? csvNum(num(d.faktor), 2) : "", csvNum(c.flis, 2), r.type === "stok" ? k.n : "", d.note || "",
+      csvNum(r.type === "stak" ? c.fast : k.m3, 2), r.type === "stak" && d.type === "flis" ? csvNum(num(d.faktor), 2) : "", csvNum(c.flis, 2), r.type === "stok" ? k.n : "",
+      r.type === "stok" && d.bark ? d.bark + " bark" : "", r.type === "stok" && d.bark === "med" ? csvNum(num(d.barkcm) || 0, 1) : "", r.type === "stok" ? (d.nedrund ? "ja" : "nej") : "",
+      r.type === "stok" ? csvNum(num(d.overmaal), 0) : "", d.note || "",
       r.lat ? r.lat.toFixed(6).replace(".", ",") : "", r.lon ? r.lon.toFixed(6).replace(".", ",") : ""].map(csvCell).join(";"));
   }
   return { csv: "\ufeff" + lines.join("\r\n") + "\r\n", rows: piles.length };
@@ -1397,12 +1634,13 @@ function buildGeoJSON() {
   return {
     type: "FeatureCollection",
     features: state.regs.map(r => {
-      const props = { id: r.id, type: r.type, oprettet: r.created, gps_noejagtighed_m: r.accuracy ? Math.round(r.accuracy) : null,
+      const props = { id: r.id, type: r.type, oprettet: r.created, rettet: r.updated || r.created, gps_noejagtighed_m: r.accuracy ? Math.round(r.accuracy) : null,
         afd: r.stand?.afd ?? null, litra: r.stand?.litra ?? null, litra_navn: r.stand?.label ?? null, compartment_id: r.stand?.compartment_id ?? null,
         note: r.data.note || null, note_id: r.data.parent || null, generel: r.data.general ? 1 : null };
       if (r.type === "proeveflade") { const s = plotStats(r.data); Object.assign(props, { radius_m: r.data.radius, antal_traeer: s.n, stamtal_ha: s.N != null ? Math.round(s.N) : null,
         grundflade_m2_ha: s.G != null ? +s.G.toFixed(2) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), bk_pct: r.data.bk, traeer_json: JSON.stringify(r.data.trees) }); }
       if (r.type === "vinkel") { const s = vinkelStats(r.data); Object.assign(props, { baf: s.baf, antal_traeer: s.cnt, grundflade_m2_ha: +s.G.toFixed(2),
+        // CLAUDE-1162: punktets N/Dg/Hg bygger på få træer og er et skøn; litraets tal går via taksationsarket.
         stamtal_ha: s.N ? Math.round(s.N) : null, dg_cm: s.Dg && +s.Dg.toFixed(1), hg_m: s.Hg && +s.Hg.toFixed(1), traeer_json: JSON.stringify({ counts: r.data.counts, trees: r.data.trees }) });
         const v = vinkelVolume(s, standProps(r.stand?.key), r.stand?.art); if (v) props.vedmasse_m3_ha = Math.round(v.V); }
       if (r.type === "taksation") Object.assign(props, { hg_m: r.data.hg, dg_cm: r.data.dg, stamtal_ha: r.data.n, grundflade_m2_ha: r.data.g, vedmasse_m3_ha: r.data.v, bk_pct: r.data.bk, ny_traeart: r.data.art || null });
@@ -1425,7 +1663,12 @@ function buildGeoJSON() {
 function buildExportZip(withPhotos = true) {
   const zip = new JSZip(), stamp = today(), { csv, rows } = buildTaxCsv();
   zip.file(`taksationsark_felt_${stamp}.csv`, csv);
-  zip.file("registreringer.geojson", JSON.stringify({ ...buildGeoJSON(), skovplan: { ejendom: state.data?.name || null, ...(state.data?.pakke || {}) } }, null, 1));
+  // CLAUDE-1162 (K4): eksporten er fuld (alle registreringer for ejendommen på denne telefon). SkovPlan opdaterer ændrede
+  // registreringer og markerer dem, der er slettet her, som slettet. «Ryddede» (fjernet efter eksport) er ikke slettet.
+  const ej = state.data?.name || null, tomb = tombstones(), forEj = o => Object.entries(o).filter(([, v]) => !ej || !v.ejendom || v.ejendom === ej);
+  zip.file("registreringer.geojson", JSON.stringify({ ...buildGeoJSON(), skovplan: { ejendom: ej, ...(state.data?.pakke || {}),
+    fuld: true, enhed: deviceId(), eksporteret: new Date().toISOString(),
+    slettede: forEj(tomb.slettet).map(([id, v]) => ({ id, dato: v.dato })), ryddede: forEj(tomb.ryddet).map(([id]) => id) } }, null, 1));
   const trees = buildTreeCsv(); if (trees.rows) zip.file(`enkelttraeer_${stamp}.csv`, trees.csv);
   const piles = buildPileCsv(); if (piles.rows) zip.file(`stakke_og_stokke_${stamp}.csv`, piles.csv);
   if (withPhotos) state.regs.filter(r => r.photo).forEach(r => zip.file(photoName(r), r.photo));
@@ -1433,9 +1676,13 @@ function buildExportZip(withPhotos = true) {
     `SkovPlan Felt – eksport ${new Date().toLocaleString("da-DK")}`, `Skov: ${state.data?.name || ""}`, "",
     "Hent filen ind i SkovPlan med «Hent data fra app» (Import og ældre driftsplaner).", "",
     `taksationsark_felt_${stamp}.csv: ${rows} litra (indlæses automatisk af «Hent data fra app»).`,
-    "  Tomme celler betyder «behold SkovPlans tal». Hg/Dg/stamtal/grundflade er beregnet fra prøvefladerne (gennemsnit pr. litra).",
+    "  Tomme celler betyder «behold SkovPlans tal». Tallene er litraets HOVEDART (største grundflade); de andre arter står i appen.",
+    "  Dg er den kvadratiske middeldiameter (G = N·π/4·Dg²). Hg er Loreys middelhøjde (Σg·h/Σg) over alle træer; højder, der ikke er målt,",
+    "  aflæses på en Näslund-højdekurve pr. litra, når litraet har mindst 3 målte højder.",
+    `  Relaskop: stamtal, Dg og Hg regnes pr. art og kommer kun med, når litraet har mindst ${MIN_SAMPLED} målte træer af arten; ellers er de et skøn.`,
+    "  Vedmasse = skaftmasse m. bark til top, uden grene (SkovPlans stammekurve). Er Hg taget fra planen, står vedmassen tom.",
     "enkelttraeer_<dato>.csv: alle målte træer, én række pr. træ (art, diameter, højde, bemærkning). Åbner i Excel.",
-    "stakke_og_stokke_<dato>.csv: opmålte stakke og stokke med rummeter, m³ fast og m³ flis. Åbner i Excel.",
+    `stakke_og_stokke_<dato>.csv: opmålte stakke og stokke med rummeter, m³ fast og rm flis (løs; standard ${String(chipFactor()).replace(".", ",")} rm flis pr. m³ fast). Åbner i Excel.`,
     "registreringer.geojson: alle prøveflader, fotos og noter som punkter (WGS84). Kan trækkes direkte ind i QGIS.",
     "fotos/: billederne; filnavnet står i feltet «foto» i geojson-filen.",
   ].join("\r\n"));
@@ -1475,6 +1722,7 @@ async function clearExported() {
   const done = state.regs.filter(r => r.exported);
   if (!done.length) return toast("Ingen eksporterede registreringer at slette");
   if (!confirm(`Slet ${done.length} registreringer, der allerede er eksporteret?`)) return;
+  markGone(done.map(r => r.id), "ryddet");   // CLAUDE-1162 (K4): ryddet fra telefonen, ikke slettet i SkovPlan
   for (const r of done) await db.del("regs", r.id);
   dropRegs(r => r.exported); drawRegMarkers(); restyle(); refreshMenuInfo(); closeSheet();
 }

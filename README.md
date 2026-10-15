@@ -21,7 +21,13 @@ Appen kan også åbne `skovdriftsplan.gpkg` og `ortofoto_feltapp.mbtiles` hver f
 ## Det kan den
 - Litraer farvet som i SkovPlan, veje, kortlinjer og ejendomsgrænse oven på ortofotoet.
 - GPS-position og hvilket litra du står i; tryk på et litra for art, alder, Hg, Dg, stamtal, G, vedmasse og bemærkning.
-- **Prøveflade**: radius (5,64/7,98/10/12,62/15 m), træ-tabel med D1/D2 (krydsklupning), højde og bemærkning. Beregner stamtal/ha, G/ha, Dg (kvadratisk middeldiameter, som i SkovPlan; den grundfladevægtede Σd³/Σd² vises ved siden af) og Hg (grundfladevægtet).
+- **Prøveflade**: vandret radius (5,64/7,98/10/12,62/15 m), træ-tabel med D1/D2 (krydsklupning i 1,3 m), højde og bemærkning, valgfri klupningsgrænse. Et kanttræ tæller, når stammens midte er inden for radius. Beregner stamtal/ha, G/ha, Dg (kvadratisk middeldiameter, som i SkovPlan; den grundfladevægtede Σd³/Σd² vises ved siden af) og Hg.
+- **Litraets Hg** er Loreys middelhøjde (Σg·h/Σg) over alle træer. Har litraet mindst 3 målte højder, aflæses de øvrige træers højde på en Näslund-højdekurve h = 1,3 + (d/(a+b·d))², tilpasset pr. art (ellers pr. litra).
+- **Relaskopmåling**: G = BAF × (ind + ½ grænse). Stamtal, Dg og Hg regnes pr. art ud fra de målte træer af samme art (w = talte/målte pr. art); arter uden målte træer får kun G. Tallene kommer først i taksationsarket, når litraet har mindst 8 målte træer af arten (ellers «skøn»): mål 1–2 træer på hvert punkt, så litraet får mindst 10. Faktoren låses kun til punkter fra samme år. Kamerasigtet er en hjælp, ikke et kalibreret relaskop (ingen hældningskorrektion).
+- **Vedmasse** = G × Hg × formtal pr. art = skaftmasse m. bark til top, uden grene (SkovPlans stammekurve; formtal 0,30–0,70). For bøg, eg og ask vises Madsens DFF 350-volumen med grene til sammenligning. Er Hg taget fra planen, eksporteres vedmassen ikke.
+- **Taksationsarket** fra appen indeholder litraets hovedart (største grundflade); de andre arter vises i appen.
+- **Stakke og stokke**: rummeter = L × D × H (flere mål med mellemrum giver gennemsnit; «+» og «/» afvises), m³ fast = rm × fastmasse-% (beregnet), rm flis (løs) = m³ fast × 2,6 som i SkovPlan. Stokke efter Huber, målt med eller uden bark (barkfradrag pr. art som forslag), nedrunding af d til hel cm og L til 0,1 m og overmål.
+- **Rettelser og sletninger** sendes med i næste eksport/synk; SkovPlan opdaterer rettede registreringer og markerer slettede (staklisten viser «opmålt/rettet <dato>» og udelader slettede).
 - **Direkte taksation**, **fotos** (1600 px) og **noter** med GPS-punkt og litra. En note kan have flere billeder.
 - **Generel note** (menuen): note med billeder, der ikke hører til et litra, fx om veje eller hegn.
 - I SkovPlan står litraets noter og fotos i sin egen sektion **«Fra felten»** i litra-vinduet, ikke i bemærkningen.
